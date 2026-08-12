@@ -1,0 +1,208 @@
+'use client'
+
+import { useEffect, useRef, useState } from 'react'
+import { motion } from 'framer-motion'
+import { Button } from '@/components/ui/button'
+import { CheckCircle2, ArrowLeft, Video } from 'lucide-react'
+import Link from 'next/link'
+import { useGazeTracking } from '@/lib/eye-tracking/useGazeTracking'
+import type { CalibrationSample } from '@/lib/eye-tracking/calibration'
+
+// Nine fixation targets spread across the viewport (fractions of w/h).
+const CALIBRATION_POINTS: { fx: number; fy: number }[] = [
+  { fx: 0.12, fy: 0.15 },
+  { fx: 0.5, fy: 0.15 },
+  { fx: 0.88, fy: 0.15 },
+  { fx: 0.12, fy: 0.5 },
+  { fx: 0.5, fy: 0.5 },
+  { fx: 0.88, fy: 0.5 },
+  { fx: 0.12, fy: 0.85 },
+  { fx: 0.5, fy: 0.85 },
+  { fx: 0.88, fy: 0.85 },
+]
+
+const SETTLE_MS = 900 // let the eye land on the dot before sampling
+const SAMPLES_PER_POINT = 12
+const SAMPLE_INTERVAL_MS = 50
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
+export default function CalibrationPage() {
+  const gaze = useGazeTracking()
+  const [currentPoint, setCurrentPoint] = useState(-1)
+  const [isComplete, setIsComplete] = useState(false)
+  const [accuracy, setAccuracy] = useState(0)
+
+  const startedRef = useRef(false)
+  const mountedRef = useRef(true)
+
+  // Start the camera on mount; tear-down is handled by the hook.
+  // Set mountedRef here rather than only at useRef init: under Strict Mode the
+  // effect runs mount -> cleanup -> mount, and the cleanup's `false` would
+  // otherwise stick for the whole life of the component and abort the sequence.
+  useEffect(() => {
+    mountedRef.current = true
+    gaze.start()
+    return () => {
+      mountedRef.current = false
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Run the calibration sequence once the tracker is live.
+  useEffect(() => {
+    if (!gaze.isReady || startedRef.current) return
+    startedRef.current = true
+
+    const run = async () => {
+      const samples: CalibrationSample[] = []
+
+      for (let i = 0; i < CALIBRATION_POINTS.length; i++) {
+        if (!mountedRef.current) return
+        setCurrentPoint(i)
+        await sleep(SETTLE_MS)
+
+        const p = CALIBRATION_POINTS[i]
+        const targetX = p.fx * window.innerWidth
+        const targetY = p.fy * window.innerHeight
+
+        for (let s = 0; s < SAMPLES_PER_POINT; s++) {
+          if (!mountedRef.current) return
+          const sample = gaze.makeSample(targetX, targetY)
+          if (sample) samples.push(sample)
+          await sleep(SAMPLE_INTERVAL_MS)
+        }
+      }
+
+      if (!mountedRef.current) return
+      const rms = gaze.calibrate(samples)
+      const diag = Math.hypot(window.innerWidth, window.innerHeight)
+      const acc =
+        rms === null ? 0 : Math.max(40, Math.min(99, Math.round(100 - (rms / diag) * 400)))
+      setAccuracy(acc)
+      setIsComplete(true)
+    }
+
+    run()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gaze.isReady])
+
+  const getPointStyle = (index: number) => ({
+    left: `${CALIBRATION_POINTS[index].fx * 100}%`,
+    top: `${CALIBRATION_POINTS[index].fy * 100}%`,
+  })
+
+  const cameraBlocked = gaze.error !== null && !gaze.isReady
+
+  return (
+    <div className="min-h-screen bg-background overflow-hidden">
+      {/* Corner webcam preview so the player can align their face. */}
+      <div className="fixed bottom-4 right-4 z-20 w-40 rounded-lg overflow-hidden border border-border bg-background shadow-lg">
+        <video
+          ref={gaze.videoRef}
+          autoPlay
+          playsInline
+          muted
+          className="w-full h-28 object-cover -scale-x-100"
+        />
+        <div className="px-2 py-1 text-[10px] text-muted-foreground">
+          {gaze.isReady ? 'Tracking' : 'Starting camera…'}
+        </div>
+      </div>
+
+      {/* Back button */}
+      <Link href="/game" className="fixed top-4 left-4 z-20">
+        <motion.button
+          whileHover={{ scale: 1.05 }}
+          whileTap={{ scale: 0.95 }}
+          className="flex items-center gap-2 text-muted-foreground hover:text-foreground transition-colors"
+        >
+          <ArrowLeft className="w-5 h-5" />
+          Back to Game
+        </motion.button>
+      </Link>
+
+      {cameraBlocked ? (
+        // Camera permission / error state
+        <div className="min-h-screen flex flex-col items-center justify-center p-4 text-center gap-4">
+          <Video className="w-12 h-12 text-yellow-400" />
+          <h1 className="text-2xl font-bold text-foreground">Camera needed</h1>
+          <p className="text-muted-foreground max-w-sm">{gaze.error}</p>
+          <Button onClick={gaze.start} className="bg-primary hover:bg-accent">
+            Try Again
+          </Button>
+        </div>
+      ) : isComplete ? (
+        // Completion screen
+        <div className="min-h-screen flex items-center justify-center p-4">
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.5 }}
+            className="space-y-6 text-center max-w-lg w-full"
+          >
+            <div className="flex justify-center">
+              <div className="relative">
+                <CheckCircle2 className="w-20 h-20 text-green-400" />
+                <motion.div
+                  animate={{ rotate: 360 }}
+                  transition={{ duration: 2, repeat: Infinity, ease: 'linear' }}
+                  className="absolute inset-0 border-2 border-transparent border-t-primary rounded-full"
+                />
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <h1 className="text-3xl font-bold text-foreground">Calibration Complete!</h1>
+              <p className="text-lg text-muted-foreground">
+                Your eye tracking is now ready to use
+              </p>
+            </div>
+
+            <div className="flex items-center justify-between p-4 rounded-lg bg-card border border-border">
+              <span className="text-muted-foreground">Estimated accuracy</span>
+              <span className="text-2xl font-bold text-primary">{accuracy}%</span>
+            </div>
+
+            <Link href="/game" className="block w-full">
+              <Button size="lg" className="w-full bg-primary hover:bg-accent">
+                Start Playing
+              </Button>
+            </Link>
+          </motion.div>
+        </div>
+      ) : (
+        // Active calibration overlay
+        <>
+          <div className="fixed top-6 left-1/2 -translate-x-1/2 z-20 text-center space-y-1">
+            <h1 className="text-xl font-bold text-foreground">Follow the dot</h1>
+            <p className="text-sm text-muted-foreground">
+              {currentPoint < 0
+                ? 'Starting camera…'
+                : `Point ${currentPoint + 1} of ${CALIBRATION_POINTS.length} — keep your head still`}
+            </p>
+          </div>
+
+          {currentPoint >= 0 && (
+            <motion.div
+              key={currentPoint}
+              className="fixed z-10"
+              style={{ ...getPointStyle(currentPoint), transform: 'translate(-50%, -50%)' }}
+              initial={{ scale: 0 }}
+              animate={{ scale: 1 }}
+            >
+              {/* Pulsing outer ring */}
+              <motion.div
+                animate={{ scale: [1, 1.6], opacity: [0.8, 0] }}
+                transition={{ duration: 1.2, repeat: Infinity }}
+                className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-10 h-10 rounded-full border-2 border-primary"
+              />
+              {/* Core dot */}
+              <div className="w-5 h-5 rounded-full bg-gradient-to-br from-primary to-accent shadow-lg shadow-primary/50" />
+            </motion.div>
+          )}
+        </>
+      )}
+    </div>
+  )
+}
