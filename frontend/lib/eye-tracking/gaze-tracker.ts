@@ -27,16 +27,14 @@ import {
 
 // --- Landmark indices (MediaPipe canonical face mesh) ---------------------
 // "Right"/"left" are in image space; consistency is all that matters here.
+// Gaze is the iris position relative to the eye corners, averaged over both
+// eyes; the raw signal is then smoothed at the source to tame iris jitter.
 const RIGHT_EYE_INNER = 133
 const RIGHT_EYE_OUTER = 33
-const RIGHT_EYE_TOP = 159
-const RIGHT_EYE_BOTTOM = 145
 const RIGHT_IRIS_CENTER = 468
 
 const LEFT_EYE_INNER = 362
 const LEFT_EYE_OUTER = 263
-const LEFT_EYE_TOP = 386
-const LEFT_EYE_BOTTOM = 374
 const LEFT_IRIS_CENTER = 473
 
 export interface FrameResult {
@@ -59,8 +57,55 @@ interface Point3 {
   z: number
 }
 
-function dist2d(a: Point3, b: Point3): number {
-  return Math.hypot(a.x - b.x, a.y - b.y)
+/**
+ * One-Euro filter: an adaptive low-pass that suppresses jitter hard while the
+ * signal is nearly still, then relaxes as the signal speeds up so it doesn't
+ * lag. For a gaze cursor this is the right trade — it must sit rock-steady
+ * during a fixation (so a dwell can land on one square) yet keep up with fast
+ * saccades. A fixed EMA can only pick one of those two behaviours.
+ */
+class OneEuroFilter {
+  private prev: number | null = null
+  private prevDeriv = 0
+  private prevT: number | null = null
+
+  constructor(
+    private readonly minCutoff: number,
+    private readonly beta: number,
+    private readonly dCutoff = 1,
+  ) {}
+
+  private alpha(cutoff: number, dt: number): number {
+    const tau = 1 / (2 * Math.PI * cutoff)
+    return 1 / (1 + tau / dt)
+  }
+
+  reset(): void {
+    this.prev = null
+    this.prevDeriv = 0
+    this.prevT = null
+  }
+
+  filter(value: number, tMs: number): number {
+    if (this.prev === null || this.prevT === null) {
+      this.prev = value
+      this.prevT = tMs
+      return value
+    }
+    let dt = (tMs - this.prevT) / 1000
+    if (!(dt > 0)) dt = 1 / 60 // guard against non-monotonic timestamps
+    this.prevT = tMs
+
+    const deriv = (value - this.prev) / dt
+    const edValue =
+      this.prevDeriv + this.alpha(this.dCutoff, dt) * (deriv - this.prevDeriv)
+    this.prevDeriv = edValue
+
+    const cutoff = this.minCutoff + this.beta * Math.abs(edValue)
+    const filtered = this.prev + this.alpha(cutoff, dt) * (value - this.prev)
+    this.prev = filtered
+    return filtered
+  }
 }
 
 /**
@@ -101,10 +146,20 @@ export class GazeTracker {
   private calibration: CalibrationModel | null = null
   private lastFeature: RawGazeFeature | null = null
 
-  // Exponential-moving-average state for output smoothing.
-  private emaX: number | null = null
-  private emaY: number | null = null
-  private readonly emaAlpha = 0.35
+  // Adaptive output smoothing, one filter per axis. minCutoff sets the floor of
+  // stillness-smoothing; beta sets how quickly it opens up as the gaze moves.
+  private readonly filterX = new OneEuroFilter(0.5, 0.012)
+  private readonly filterY = new OneEuroFilter(0.5, 0.012)
+  private lastX = 0
+  private lastY = 0
+
+  // Source-level smoothing of the raw iris offset, applied before calibration
+  // so the model's squared/interaction terms can't amplify iris jitter (a jitter
+  // the output filter alone can't fully undo). This is the main stability fix.
+  // Lower alpha = heavier smoothing (more lag); this is the main knob to tune.
+  private smGx: number | null = null
+  private smGy: number | null = null
+  private readonly featureAlpha = 0.08
 
   get hasCalibration(): boolean {
     return this.calibration !== null
@@ -148,7 +203,7 @@ export class GazeTracker {
     if (!landmarks) {
       return {
         facePresent: false,
-        gazePoint: { x: this.emaX ?? 0, y: this.emaY ?? 0 },
+        gazePoint: { x: this.lastX, y: this.lastY },
         feature: this.lastFeature ?? { gx: 0, gy: 0, headX: 0, headY: 0 },
         blinkScore: 0,
         eyesClosed: false,
@@ -165,11 +220,11 @@ export class GazeTracker {
       ? predictGaze(this.calibration, feature)
       : defaultGaze(feature, width, height)
 
-    // Clamp to viewport, then smooth.
+    // Clamp to viewport, then smooth with the adaptive filter.
     const clampedX = Math.max(0, Math.min(width, raw.x))
     const clampedY = Math.max(0, Math.min(height, raw.y))
-    this.emaX = this.emaX === null ? clampedX : this.emaX + this.emaAlpha * (clampedX - this.emaX)
-    this.emaY = this.emaY === null ? clampedY : this.emaY + this.emaAlpha * (clampedY - this.emaY)
+    this.lastX = this.filterX.filter(clampedX, timestampMs)
+    this.lastY = this.filterY.filter(clampedY, timestampMs)
 
     const blinkScore = this.extractBlink(result)
     const eyesClosed = blinkScore > 0.5
@@ -180,7 +235,7 @@ export class GazeTracker {
 
     return {
       facePresent: true,
-      gazePoint: { x: this.emaX, y: this.emaY },
+      gazePoint: { x: this.lastX, y: this.lastY },
       feature,
       blinkScore,
       eyesClosed,
@@ -192,43 +247,33 @@ export class GazeTracker {
     landmarks: Point3[],
     result: FaceLandmarkerResult,
   ): RawGazeFeature {
-    const eyeFeature = (
-      inner: number,
-      outer: number,
-      top: number,
-      bottom: number,
-      iris: number,
-    ) => {
-      const li = landmarks[inner]
-      const lo = landmarks[outer]
-      const center = { x: (li.x + lo.x) / 2, y: (li.y + lo.y) / 2, z: 0 }
-      const eyeWidth = dist2d(li, lo) || 1e-4
-      const irisPt = landmarks[iris]
-      return {
-        gx: (irisPt.x - center.x) / eyeWidth,
-        gy: (irisPt.y - center.y) / eyeWidth,
-        // Openness kept available for future use; not part of the feature.
-        openness: dist2d(landmarks[top], landmarks[bottom]) / eyeWidth,
-      }
+    // Iris offset relative to the eye's corners, normalised by eye width so it's
+    // roughly distance-invariant. This is the actual gaze-direction signal — it
+    // moves as the eye moves.
+    const eyeOffset = (innerI: number, outerI: number, irisI: number) => {
+      const inner = landmarks[innerI]
+      const outer = landmarks[outerI]
+      const iris = landmarks[irisI]
+      const cx = (inner.x + outer.x) / 2
+      const cy = (inner.y + outer.y) / 2
+      const eyeWidth = Math.hypot(inner.x - outer.x, inner.y - outer.y) || 1e-4
+      return { gx: (iris.x - cx) / eyeWidth, gy: (iris.y - cy) / eyeWidth }
     }
 
-    const right = eyeFeature(
-      RIGHT_EYE_INNER,
-      RIGHT_EYE_OUTER,
-      RIGHT_EYE_TOP,
-      RIGHT_EYE_BOTTOM,
-      RIGHT_IRIS_CENTER,
-    )
-    const left = eyeFeature(
-      LEFT_EYE_INNER,
-      LEFT_EYE_OUTER,
-      LEFT_EYE_TOP,
-      LEFT_EYE_BOTTOM,
-      LEFT_IRIS_CENTER,
-    )
+    const right = eyeOffset(RIGHT_EYE_INNER, RIGHT_EYE_OUTER, RIGHT_IRIS_CENTER)
+    const left = eyeOffset(LEFT_EYE_INNER, LEFT_EYE_OUTER, LEFT_IRIS_CENTER)
+
+    // Average the two eyes (halves the per-eye noise) and mirror X, since the
+    // webcam feed is mirrored — looking screen-right moves the iris toward the
+    // image's left. Then smooth at the source to kill the residual jitter.
+    const rawGx = -((right.gx + left.gx) / 2)
+    const rawGy = (right.gy + left.gy) / 2
+    this.smGx = this.smGx === null ? rawGx : this.smGx + this.featureAlpha * (rawGx - this.smGx)
+    this.smGy = this.smGy === null ? rawGy : this.smGy + this.featureAlpha * (rawGy - this.smGy)
 
     // Head forward vector from the facial transformation matrix (column-major).
     // Column 2 is the local +Z axis in world space -> where the face points.
+    // It lets the model lean on head pose too, so small head turns help aim.
     let headX = 0
     let headY = 0
     const matrix = result.facialTransformationMatrixes?.[0]?.data
@@ -237,12 +282,7 @@ export class GazeTracker {
       headY = matrix[9]
     }
 
-    return {
-      gx: (right.gx + left.gx) / 2,
-      gy: (right.gy + left.gy) / 2,
-      headX,
-      headY,
-    }
+    return { gx: this.smGx, gy: this.smGy, headX, headY }
   }
 
   private extractBlink(result: FaceLandmarkerResult): number {
@@ -271,12 +311,18 @@ export class GazeTracker {
     if (!model) return null
     this.calibration = model
     saveCalibration(model)
+    // The mapping just changed; drop filter history so the cursor snaps to the
+    // new estimate instead of easing in from the old one.
+    this.filterX.reset()
+    this.filterY.reset()
     return model.rmsError
   }
 
   resetCalibration(): void {
     this.calibration = null
     clearCalibration()
+    this.filterX.reset()
+    this.filterY.reset()
   }
 
   close(): void {

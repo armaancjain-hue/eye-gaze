@@ -1,5 +1,5 @@
 export const BOARD_SIZE = 8
-export const SQUARE_SIZE_PX = 64
+export const SQUARE_SIZE_PX = 88
 
 export const COLUMN_LABELS = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'] as const
 export const ROW_LABELS = ['1', '2', '3', '4', '5', '6', '7', '8'] as const

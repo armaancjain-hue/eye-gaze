@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
 import { Button } from '@/components/ui/button'
-import { CheckCircle2, ArrowLeft, Video } from 'lucide-react'
+import { CheckCircle2, ArrowLeft, Video, Eye, Loader2 } from 'lucide-react'
 import Link from 'next/link'
 import { useGazeTracking } from '@/lib/eye-tracking/useGazeTracking'
 import type { CalibrationSample } from '@/lib/eye-tracking/calibration'
@@ -29,25 +29,41 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 export default function CalibrationPage() {
   const gaze = useGazeTracking()
+  const [started, setStarted] = useState(false)
   const [currentPoint, setCurrentPoint] = useState(-1)
   const [isComplete, setIsComplete] = useState(false)
   const [accuracy, setAccuracy] = useState(0)
+  // Set true if the camera doesn't come up within a grace period after Start,
+  // so the user gets an actionable message instead of a blank waiting screen.
+  const [startTimedOut, setStartTimedOut] = useState(false)
 
   const startedRef = useRef(false)
   const mountedRef = useRef(true)
 
-  // Start the camera on mount; tear-down is handled by the hook.
-  // Set mountedRef here rather than only at useRef init: under Strict Mode the
-  // effect runs mount -> cleanup -> mount, and the cleanup's `false` would
-  // otherwise stick for the whole life of the component and abort the sequence.
+  // Keep mountedRef correct across Strict Mode's mount -> cleanup -> mount.
   useEffect(() => {
     mountedRef.current = true
-    gaze.start()
     return () => {
       mountedRef.current = false
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // Kick off the camera from an explicit user gesture (required by browsers for
+  // getUserMedia — auto-starting on mount can silently hang). Also arm a timeout
+  // so a camera that never comes up surfaces a retry instead of hanging.
+  const handleStart = () => {
+    setStartTimedOut(false)
+    setStarted(true)
+    gaze.start()
+  }
+
+  useEffect(() => {
+    if (!started || gaze.isReady || gaze.error) return
+    const t = setTimeout(() => {
+      if (mountedRef.current && !gaze.isReady) setStartTimedOut(true)
+    }, 12000)
+    return () => clearTimeout(t)
+  }, [started, gaze.isReady, gaze.error])
 
   // Run the calibration sequence once the tracker is live.
   useEffect(() => {
@@ -93,6 +109,10 @@ export default function CalibrationPage() {
   })
 
   const cameraBlocked = gaze.error !== null && !gaze.isReady
+  const showTrouble = cameraBlocked || startTimedOut
+  const troubleMsg = cameraBlocked
+    ? gaze.error
+    : 'The camera didn’t start. Make sure no other tab or app is using it, then try again.'
 
   return (
     <div className="min-h-screen bg-background overflow-hidden">
@@ -106,7 +126,7 @@ export default function CalibrationPage() {
           className="w-full h-28 object-cover -scale-x-100"
         />
         <div className="px-2 py-1 text-[10px] text-muted-foreground">
-          {gaze.isReady ? 'Tracking' : 'Starting camera…'}
+          {gaze.isReady ? 'Tracking' : started ? 'Starting camera…' : 'Camera off'}
         </div>
       </div>
 
@@ -122,13 +142,16 @@ export default function CalibrationPage() {
         </motion.button>
       </Link>
 
-      {cameraBlocked ? (
-        // Camera permission / error state
+      {showTrouble ? (
+        // Camera permission / error / timeout state
         <div className="min-h-screen flex flex-col items-center justify-center p-4 text-center gap-4">
           <Video className="w-12 h-12 text-yellow-400" />
           <h1 className="text-2xl font-bold text-foreground">Camera needed</h1>
-          <p className="text-muted-foreground max-w-sm">{gaze.error}</p>
-          <Button onClick={gaze.start} className="bg-primary hover:bg-accent">
+          <p className="text-muted-foreground max-w-sm">{troubleMsg}</p>
+          <Button
+            onClick={startTimedOut ? () => window.location.reload() : gaze.start}
+            className="bg-primary hover:bg-accent"
+          >
             Try Again
           </Button>
         </div>
@@ -171,15 +194,54 @@ export default function CalibrationPage() {
             </Link>
           </motion.div>
         </div>
+      ) : !started ? (
+        // Intro — the Start button gives the user gesture browsers need to
+        // grant the camera, and avoids sitting on a blank auto-start screen.
+        <div className="min-h-screen flex items-center justify-center p-4">
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.4 }}
+            className="space-y-6 text-center max-w-lg w-full"
+          >
+            <div className="flex justify-center">
+              <Eye className="w-16 h-16 text-primary" />
+            </div>
+            <div className="space-y-2">
+              <h1 className="text-3xl font-bold text-foreground">Calibrate eye tracking</h1>
+              <p className="text-muted-foreground">
+                We’ll show nine dots around the screen. Look at each one and keep
+                your head still. Takes about 15 seconds.
+              </p>
+            </div>
+            <Button
+              size="lg"
+              onClick={handleStart}
+              className="w-full bg-primary hover:bg-accent"
+            >
+              Start calibration
+            </Button>
+            <p className="text-xs text-muted-foreground">
+              Your camera turns on when you press start.
+            </p>
+          </motion.div>
+        </div>
+      ) : !gaze.isReady ? (
+        // Camera starting — explicit, so it never looks like a frozen screen.
+        <div className="min-h-screen flex flex-col items-center justify-center p-4 text-center gap-4">
+          <Loader2 className="w-12 h-12 text-primary animate-spin" />
+          <h1 className="text-2xl font-bold text-foreground">Starting camera…</h1>
+          <p className="text-muted-foreground max-w-sm">
+            Allow camera access if your browser asks.
+          </p>
+        </div>
       ) : (
         // Active calibration overlay
         <>
           <div className="fixed top-6 left-1/2 -translate-x-1/2 z-20 text-center space-y-1">
             <h1 className="text-xl font-bold text-foreground">Follow the dot</h1>
             <p className="text-sm text-muted-foreground">
-              {currentPoint < 0
-                ? 'Starting camera…'
-                : `Point ${currentPoint + 1} of ${CALIBRATION_POINTS.length} — keep your head still`}
+              {`Point ${Math.max(currentPoint + 1, 1)} of ${CALIBRATION_POINTS.length} — keep your head still`}
             </p>
           </div>
 

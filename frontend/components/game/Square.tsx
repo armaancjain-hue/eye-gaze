@@ -39,8 +39,9 @@ export default function Square({
       whileTap={{ scale: 0.98 }}
       onClick={onClick}
       data-square={`${row}-${col}`}
+      style={{ containerType: 'size' }}
       className={`
-        relative w-16 h-16 flex items-center justify-center
+        relative w-full aspect-square flex items-center justify-center
         ${baseColor} ${hoverColor}
         transition-all duration-200
         border border-transparent
@@ -83,7 +84,8 @@ export default function Square({
             stiffness: 260,
             damping: 20,
           }}
-          className="text-5xl cursor-move select-none"
+          style={{ fontSize: '70cqmin', lineHeight: 1 }}
+          className="cursor-move select-none"
         >
           {PIECE_UNICODE[`${piece.color}_${piece.type}`]}
         </motion.div>

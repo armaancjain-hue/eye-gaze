@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { useRouter } from 'next/navigation'
 import { motion } from 'framer-motion'
+import { ChevronLeft, ChevronRight } from 'lucide-react'
 import Chessboard from '@/components/game/Chessboard'
 import LeftSidebar from '@/components/layout/LeftSidebar'
 import EyeTrackingPanel from '@/components/eye-tracking/EyeTrackingPanel'
@@ -29,6 +30,9 @@ export default function GamePage() {
     DEFAULT_ACCESSIBILITY_SETTINGS
   )
   const [settingsOpen, setSettingsOpen] = useState(false)
+  // Collapsible side panels (lg and up); the board expands into the freed space.
+  const [leftOpen, setLeftOpen] = useState(true)
+  const [rightOpen, setRightOpen] = useState(true)
 
   // Human plays White; the backend Stockfish plays Black.
   const isHumanTurn = gameState.whiteToMove && !engineThinking
@@ -193,23 +197,46 @@ export default function GamePage() {
 
       {/* Main Game Area */}
       <div className="flex-1 flex gap-6 p-6 overflow-hidden">
-        {/* Left Sidebar - Controls */}
-        <div className="w-64 hidden lg:flex">
-          <LeftSidebar
-            difficulty={difficulty}
-            timer={timer}
-            onNewGame={handleNewGame}
-            onRestartGame={handleRestartGame}
-            onSettings={handleSettings}
-          />
-        </div>
+        {/* Left Sidebar - Controls (collapsible on lg+) */}
+        {leftOpen ? (
+          <div className="w-64 hidden lg:flex flex-col shrink-0">
+            <div className="flex justify-end mb-2">
+              <button
+                onClick={() => setLeftOpen(false)}
+                title="Collapse panel"
+                aria-label="Collapse controls panel"
+                className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-card transition-colors"
+              >
+                <ChevronLeft className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="flex-1">
+              <LeftSidebar
+                difficulty={difficulty}
+                timer={timer}
+                onNewGame={handleNewGame}
+                onRestartGame={handleRestartGame}
+                onSettings={handleSettings}
+              />
+            </div>
+          </div>
+        ) : (
+          <button
+            onClick={() => setLeftOpen(true)}
+            title="Show controls"
+            aria-label="Show controls panel"
+            className="hidden lg:flex items-center justify-center w-6 shrink-0 rounded-md border border-border bg-card/40 text-muted-foreground hover:bg-card hover:text-foreground transition-colors"
+          >
+            <ChevronRight className="w-4 h-4" />
+          </button>
+        )}
 
         {/* Center - Chessboard */}
         <motion.div
           initial={{ opacity: 0, scale: 0.95 }}
           animate={{ opacity: 1, scale: 1 }}
           transition={{ duration: 0.4 }}
-          className="flex-1 flex items-center justify-center"
+          className="flex-1 min-w-0 flex items-center justify-center"
         >
           <Chessboard
             gameState={gameState}
@@ -220,22 +247,43 @@ export default function GamePage() {
           />
         </motion.div>
 
-        {/* Right Sidebar - Eye Tracking & Move History */}
-        <div className="w-80 hidden lg:flex gap-6 flex-col">
-          <div className="flex-1">
-            <EyeTrackingPanel
-              eyeTrackingState={eyeTrackingState}
-              onCalibrationClick={handleCalibration}
-              videoRef={gaze.videoRef}
-              isReady={gaze.isReady}
-              error={gaze.error}
-              onEnableCamera={gaze.start}
-            />
+        {/* Right Sidebar - Eye Tracking & Move History (collapsible on lg+) */}
+        {rightOpen ? (
+          <div className="w-80 hidden lg:flex gap-6 flex-col shrink-0">
+            <div className="flex justify-start">
+              <button
+                onClick={() => setRightOpen(false)}
+                title="Collapse panel"
+                aria-label="Collapse tracking panel"
+                className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-card transition-colors"
+              >
+                <ChevronRight className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="flex-1">
+              <EyeTrackingPanel
+                eyeTrackingState={eyeTrackingState}
+                onCalibrationClick={handleCalibration}
+                videoRef={gaze.videoRef}
+                isReady={gaze.isReady}
+                error={gaze.error}
+                onEnableCamera={gaze.start}
+              />
+            </div>
+            <div className="flex-1 overflow-hidden">
+              <MoveHistoryPanel moves={gameState.moves} />
+            </div>
           </div>
-          <div className="flex-1 overflow-hidden">
-            <MoveHistoryPanel moves={gameState.moves} />
-          </div>
-        </div>
+        ) : (
+          <button
+            onClick={() => setRightOpen(true)}
+            title="Show tracking & history"
+            aria-label="Show tracking and history panel"
+            className="hidden lg:flex items-center justify-center w-6 shrink-0 rounded-md border border-border bg-card/40 text-muted-foreground hover:bg-card hover:text-foreground transition-colors"
+          >
+            <ChevronLeft className="w-4 h-4" />
+          </button>
+        )}
       </div>
 
       {/* Mobile Layout - Stacked */}

@@ -10,9 +10,9 @@
 
 /** The raw, per-frame signal extracted from the face mesh (see gaze-tracker). */
 export interface RawGazeFeature {
-  /** Horizontal iris offset, averaged over both eyes, normalised by eye width. */
+  /** Iris horizontal offset (mirror-corrected), averaged over both eyes, smoothed. */
   gx: number
-  /** Vertical iris offset, averaged over both eyes, normalised by eye width. */
+  /** Iris vertical offset, averaged over both eyes, smoothed. */
   gy: number
   /** Head forward-vector X component (yaw proxy) from the transform matrix. */
   headX: number
@@ -38,7 +38,10 @@ export interface CalibrationSample {
   screenY: number
 }
 
-const STORAGE_KEY = 'eye-gaze-chess.calibration.v1'
+// v3: gaze uses source-smoothed, mirror-corrected iris offset. Earlier models
+// were fitted against different feature semantics, so they're ignored and the
+// user recalibrates once.
+const STORAGE_KEY = 'eye-gaze-chess.calibration.v3'
 
 /**
  * Expand the 4-dim raw feature into an 8-dim basis with quadratic + interaction
@@ -204,15 +207,16 @@ export function clearCalibration(): void {
 /**
  * Rough uncalibrated mapping so the gaze ring still moves before calibration.
  * The gains are deliberately conservative; calibration replaces this entirely.
- * Note the sign on gx: the webcam image is mirrored, so looking screen-right
- * moves the iris toward the image's left.
+ * gx is already mirror-corrected upstream, so moving the head toward the
+ * screen's right increases it. Both the eye-midpoint offset (gx/gy) and the head
+ * forward vector (headX/headY) push the cursor the same way.
  */
 export function defaultGaze(
   feature: RawGazeFeature,
   screenWidth: number,
   screenHeight: number,
 ): { x: number; y: number } {
-  const x = screenWidth * (0.5 - feature.gx * 4 - feature.headX * 1.5)
-  const y = screenHeight * (0.5 + feature.gy * 6 + feature.headY * 1.5)
+  const x = screenWidth * (0.5 + feature.gx * 4 + feature.headX * 1.0)
+  const y = screenHeight * (0.5 + feature.gy * 6 + feature.headY * 1.0)
   return { x, y }
 }

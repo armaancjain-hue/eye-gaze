@@ -1,6 +1,6 @@
 'use client'
 
-import { useMemo } from 'react'
+import { Fragment, useMemo } from 'react'
 import { motion } from 'framer-motion'
 import { GameState, BoardPosition } from '@/lib/chess/types'
 import { BOARD_SIZE, COLUMN_LABELS, PIECE_UNICODE } from '@/lib/chess/constants'
@@ -30,34 +30,37 @@ export default function Chessboard({
     return getLegalMoves(gameState.board, gameState.selectedSquare.row, gameState.selectedSquare.col)
   }, [gameState.selectedSquare, gameState.board])
   return (
-    <div className="flex flex-col items-center justify-center gap-4 p-6">
-      {/* Row labels */}
-      <div className="flex gap-0 items-start">
-        <div className="w-8" />
-        <div className="flex gap-0">
-          {COLUMN_LABELS.map((label) => (
-            <div
-              key={label}
-              className="w-16 h-4 flex items-center justify-center text-xs font-semibold text-muted-foreground uppercase"
-            >
-              {label}
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {/* Board */}
+    <div className="flex flex-col items-center justify-center gap-4 p-6 w-full min-w-0">
+      {/* Board — scales to the available space and never overflows. Its width is
+          the smallest of: the container, a share of viewport height (so it also
+          fits vertically), and a comfortable maximum. Square cells are `1fr`
+          columns with a 1:1 aspect ratio, so everything derives from that width. */}
       <motion.div
         initial={{ opacity: 0, scale: 0.95 }}
         animate={{ opacity: 1, scale: 1 }}
         transition={{ duration: 0.4 }}
-        className="rounded-lg overflow-hidden border-2 border-primary/30 shadow-2xl"
+        className="rounded-lg overflow-hidden border-2 border-primary/30 shadow-2xl bg-background"
+        style={{ width: 'min(100%, 82vh, 880px)' }}
       >
-        <div className="inline-block bg-background">
+        <div
+          className="grid"
+          style={{ gridTemplateColumns: 'minmax(1rem, auto) repeat(8, 1fr)' }}
+        >
+          {/* Corner spacer + file labels */}
+          <div />
+          {COLUMN_LABELS.map((label) => (
+            <div
+              key={label}
+              className="h-5 flex items-center justify-center text-xs font-semibold text-muted-foreground uppercase"
+            >
+              {label}
+            </div>
+          ))}
+
           {gameState.board.map((row, rowIndex) => (
-            <div key={rowIndex} className="flex gap-0">
-              {/* Row label */}
-              <div className="w-8 flex items-center justify-center text-xs font-semibold text-muted-foreground">
+            <Fragment key={rowIndex}>
+              {/* Rank label */}
+              <div className="flex items-center justify-center px-1 text-xs font-semibold text-muted-foreground">
                 {BOARD_SIZE - rowIndex}
               </div>
 
@@ -100,7 +103,7 @@ export default function Chessboard({
                   />
                 )
               })}
-            </div>
+            </Fragment>
           ))}
         </div>
       </motion.div>
