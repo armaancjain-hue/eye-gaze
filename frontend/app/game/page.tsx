@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { useRouter } from 'next/navigation'
 import { motion } from 'framer-motion'
-import { ChevronLeft, ChevronRight } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Maximize2, Minimize2 } from 'lucide-react'
 import Chessboard from '@/components/game/Chessboard'
 import LeftSidebar from '@/components/layout/LeftSidebar'
 import EyeTrackingPanel from '@/components/eye-tracking/EyeTrackingPanel'
@@ -35,6 +35,13 @@ export default function GamePage() {
   // Collapsible side panels (lg and up); the board expands into the freed space.
   const [leftOpen, setLeftOpen] = useState(true)
   const [rightOpen, setRightOpen] = useState(true)
+  /**
+   * Focus mode hides the header and both sidebars so the board gets the whole
+   * viewport. On a laptop that is the difference between ~70px and ~115px
+   * squares — and while a bigger board doesn't shrink the *angular* gaze error,
+   * it does give real headroom over the error sources fixed in pixels.
+   */
+  const [focusMode, setFocusMode] = useState(false)
 
   // Human plays White; the backend Stockfish plays Black.
   const isHumanTurn = gameState.whiteToMove && !engineThinking
@@ -46,6 +53,24 @@ export default function GamePage() {
     ...gaze.state,
     calibrationProgress: gaze.hasCalibration ? 100 : 0,
   }
+
+  // F toggles focus mode, Escape leaves it. Reaching a button is exactly the
+  // interaction a gaze user finds hardest, so this stays keyboard-first.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null
+      // Never steal a keystroke that is being typed into something.
+      if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return
+      if (e.key === 'f' || e.key === 'F') {
+        e.preventDefault()
+        setFocusMode((v) => !v)
+      } else if (e.key === 'Escape') {
+        setFocusMode(false)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
 
   // Simulate timer countdown
   useEffect(() => {
@@ -210,8 +235,8 @@ export default function GamePage() {
         onSettingsChange={setAccessibility}
       />
 
-      {/* Top Navigation */}
-      <TopNav />
+      {/* Top Navigation — hidden in focus mode to hand its height to the board. */}
+      {!focusMode && <TopNav />}
 
       {/* Full-screen gaze cursor so the player can see (and correct) where the
           tracker thinks they're looking, with a ring that fills as a dwell lands. */}
@@ -224,10 +249,26 @@ export default function GamePage() {
         reducedMotion={accessibility.reducedMotion}
       />
 
+      {/* Focus-mode toggle. Deliberately small and out of the board's way, but
+          always present so there is a way back without the keyboard. */}
+      <button
+        onClick={() => setFocusMode((v) => !v)}
+        title={focusMode ? 'Exit focus mode (Esc)' : 'Focus mode — bigger board (F)'}
+        aria-label={focusMode ? 'Exit focus mode' : 'Enter focus mode'}
+        aria-pressed={focusMode}
+        className="fixed bottom-3 right-3 z-50 p-2 rounded-lg border border-border bg-card/80 backdrop-blur text-muted-foreground hover:text-foreground hover:bg-card transition-colors"
+      >
+        {focusMode ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
+      </button>
+
       {/* Main Game Area */}
-      <div className="flex-1 flex gap-3 p-3 overflow-hidden lg:min-h-0">
-        {/* Left Sidebar - Controls (collapsible on lg+) */}
-        {leftOpen ? (
+      <div
+        className={`flex-1 flex overflow-hidden lg:min-h-0 ${
+          focusMode ? 'gap-0 p-0' : 'gap-3 p-3'
+        }`}
+      >
+        {/* Left Sidebar - Controls (collapsible on lg+, hidden in focus mode) */}
+        {focusMode ? null : leftOpen ? (
           <div className="w-56 hidden lg:flex flex-col shrink-0 lg:min-h-0 lg:overflow-y-auto custom-scrollbar">
             <div className="flex justify-end mb-2">
               <button
@@ -266,7 +307,7 @@ export default function GamePage() {
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           transition={{ duration: 0.4 }}
-          className="flex-1 min-w-0 flex items-center justify-center"
+          className="flex-1 min-w-0 min-h-0 flex items-stretch justify-center"
         >
           <Chessboard
             gameState={gameState}
@@ -275,11 +316,13 @@ export default function GamePage() {
             dwellProgress={dwellProgress}
             dwellConfidence={dwellConfidence}
             isThinking={engineThinking}
+            focusMode={focusMode}
+            layoutKey={`${leftOpen}-${rightOpen}`}
           />
         </motion.div>
 
-        {/* Right Sidebar - Eye Tracking & Move History (collapsible on lg+) */}
-        {rightOpen ? (
+        {/* Right Sidebar - Eye Tracking & Move History (hidden in focus mode) */}
+        {focusMode ? null : rightOpen ? (
           <div className="w-72 hidden lg:flex gap-4 flex-col shrink-0 lg:min-h-0 lg:overflow-y-auto custom-scrollbar">
             <div className="flex justify-start shrink-0">
               <button
@@ -306,6 +349,7 @@ export default function GamePage() {
                 targetSquare={dwellSquare ? toAlgebraic(dwellSquare) : null}
                 targetConfidence={dwellConfidence}
                 driftWarning={gaze.driftWarning}
+                boardResized={gaze.boardResized}
               />
             </div>
             <div className="flex-1 min-h-0 overflow-hidden">
@@ -325,7 +369,11 @@ export default function GamePage() {
       </div>
 
       {/* Mobile Layout - Stacked */}
-      <div className="lg:hidden px-4 py-4 space-y-4 border-t border-border">
+      <div
+        className={`px-4 py-4 space-y-4 border-t border-border ${
+          focusMode ? 'hidden' : 'lg:hidden'
+        }`}
+      >
         <LeftSidebar
           difficulty={difficulty}
           timer={timer}
@@ -345,6 +393,7 @@ export default function GamePage() {
             targetSquare={dwellSquare ? toAlgebraic(dwellSquare) : null}
             targetConfidence={dwellConfidence}
             driftWarning={gaze.driftWarning}
+            boardResized={gaze.boardResized}
           />
           <MoveHistoryPanel moves={gameState.moves} />
         </div>

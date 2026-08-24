@@ -1,14 +1,25 @@
 'use client'
 
 import Link from 'next/link'
+import { useRouter } from 'next/navigation'
 import { motion } from 'framer-motion'
-import { Menu, Settings, Moon, Sun, User } from 'lucide-react'
+import { LogOut, Menu, Settings, Moon, Sun, User } from 'lucide-react'
 import { useState } from 'react'
 import { Button } from '@/components/ui/button'
+import { useSession } from '@/lib/auth/useSession'
 
 export default function TopNav() {
   const [isDark, setIsDark] = useState(true)
   const [menuOpen, setMenuOpen] = useState(false)
+  const { user, loading, signOut } = useSession()
+  const router = useRouter()
+
+  const handleSignOut = async () => {
+    await signOut()
+    setMenuOpen(false)
+    router.push('/')
+    router.refresh()
+  }
 
   return (
     <motion.header
@@ -49,14 +60,44 @@ export default function TopNav() {
             )}
           </motion.button>
 
-          {/* User Menu */}
-          <motion.button
-            whileHover={{ scale: 1.1 }}
-            whileTap={{ scale: 0.95 }}
-            className="p-2 rounded-lg hover:bg-muted transition-colors hidden sm:flex"
-          >
-            <User className="w-5 h-5 text-muted-foreground" />
-          </motion.button>
+          {/* Account. Renders nothing until the session has loaded, so the nav
+              doesn't flash "Sign in" at someone who is already signed in. */}
+          {!loading && (
+            <div className="hidden sm:flex items-center gap-2">
+              {user ? (
+                <>
+                  <span
+                    className="flex items-center gap-2 px-2 py-1 rounded-lg text-sm text-muted-foreground max-w-[12rem]"
+                    title={user.email}
+                  >
+                    <User className="w-4 h-4 shrink-0" />
+                    <span className="truncate">{user.name}</span>
+                  </span>
+                  <motion.button
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                    onClick={handleSignOut}
+                    title="Sign out"
+                    aria-label="Sign out"
+                    className="p-2 rounded-lg hover:bg-muted transition-colors"
+                  >
+                    <LogOut className="w-5 h-5 text-muted-foreground" />
+                  </motion.button>
+                </>
+              ) : (
+                <>
+                  <Link href="/signin">
+                    <Button variant="ghost" size="sm">
+                      Sign in
+                    </Button>
+                  </Link>
+                  <Link href="/signup">
+                    <Button size="sm">Sign up</Button>
+                  </Link>
+                </>
+              )}
+            </div>
+          )}
 
           {/* Settings */}
           <motion.button
@@ -92,11 +133,35 @@ export default function TopNav() {
               Home
             </Button>
           </Link>
+          {user ? (
+            <>
+              <p className="px-2 text-sm text-muted-foreground truncate">
+                Signed in as {user.name}
+              </p>
+              <Button
+                variant="outline"
+                className="w-full justify-start"
+                onClick={handleSignOut}
+              >
+                Sign out
+              </Button>
+            </>
+          ) : (
+            <>
+              <Link href="/signin">
+                <Button variant="outline" className="w-full justify-start">
+                  Sign in
+                </Button>
+              </Link>
+              <Link href="/signup">
+                <Button variant="outline" className="w-full justify-start">
+                  Sign up
+                </Button>
+              </Link>
+            </>
+          )}
           <Button variant="outline" className="w-full justify-start">
             Settings
-          </Button>
-          <Button variant="outline" className="w-full justify-start">
-            About
           </Button>
         </motion.div>
       )}

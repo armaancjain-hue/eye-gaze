@@ -23,6 +23,9 @@ interface EyeTrackingPanelProps {
   targetConfidence?: number
   /** True while the player has drifted out of the pose they calibrated at. */
   driftWarning?: boolean
+  /** True when the board has been resized enough that the fit no longer holds. */
+  boardResized?: boolean
+  onRecalibrate?: () => void
 }
 
 export default function EyeTrackingPanel({
@@ -36,6 +39,7 @@ export default function EyeTrackingPanel({
   targetSquare = null,
   targetConfidence = 0,
   driftWarning = false,
+  boardResized = false,
 }: EyeTrackingPanelProps) {
   const isActive = eyeTrackingState.status === 'active'
   const statusColor = isActive ? 'text-green-400' : 'text-yellow-400'
@@ -157,6 +161,24 @@ export default function EyeTrackingPanel({
             className="h-full bg-accent rounded-full"
           />
         </div>
+        {boardResized && (
+          <p className="text-xs text-yellow-400 flex items-start gap-1">
+            <AlertCircle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+            <span>
+              The board is a different size than when you calibrated. Recalibrate
+              to get the accuracy back.
+            </span>
+          </p>
+        )}
+        {calibrationQuality && !calibrationQuality.headCompensation && (
+          <p className="text-xs text-yellow-400 flex items-start gap-1">
+            <AlertCircle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+            <span>
+              No head compensation — tracking will drift if you move. Recalibrate
+              and shift a little when prompted.
+            </span>
+          </p>
+        )}
         {driftWarning && (
           <p className="text-xs text-yellow-400 flex items-start gap-1">
             <AlertCircle className="w-3.5 h-3.5 mt-0.5 shrink-0" />

@@ -156,6 +156,20 @@ export function sameSquare(a: BoardPosition | null, b: BoardPosition | null): bo
 }
 
 /**
+ * How much larger (or smaller) the board is now than when it was calibrated.
+ * Returns 1 when they match, or null when either rect is unknown.
+ *
+ * `remapForBoard` keeps a modest layout shift honest, but it cannot rescue a
+ * large one: play-time gaze angles then fall outside the range the model was
+ * ever shown, and the prediction becomes extrapolation. Past roughly 15% the
+ * only real fix is to calibrate again at the size being played on.
+ */
+export function boardScaleRatio(from: BoardRect | null, to: BoardGeometry | null): number | null {
+  if (!from || !to || !(from.width > 0) || !(to.width > 0)) return null
+  return to.width / from.width
+}
+
+/**
  * Re-anchor a gaze prediction from the board rect it was calibrated against to
  * the board's current rect. Calibration targets were placed relative to the
  * board, so when the board moves or resizes (a side panel collapses, the window

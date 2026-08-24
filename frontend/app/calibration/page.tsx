@@ -14,6 +14,10 @@ import {
   type BoardGeometry,
 } from '@/lib/eye-tracking/board-mapping'
 import { BOARD_SIZE } from '@/lib/chess/constants'
+import { useMaxSquareSize } from '@/lib/game/useMaxSquareSize'
+
+/** Kept in step with the game board's cap so both are measured the same way. */
+const MAX_BOARD_PX = 1400
 
 /**
  * Calibration is run *over the chessboard itself*, not over the bare viewport.
@@ -26,8 +30,8 @@ import { BOARD_SIZE } from '@/lib/chess/constants'
 type PointCount = 9 | 16
 
 const POINT_COUNT_OPTIONS: { count: PointCount; label: string; blurb: string }[] = [
-  { count: 9, label: 'Quick — 9 points', blurb: 'About 20 seconds. Good enough to play.' },
-  { count: 16, label: 'Full — 16 points', blurb: 'About 35 seconds. Noticeably steadier squares.' },
+  { count: 9, label: 'Quick — 9 points', blurb: 'About 25 seconds. Good enough to play.' },
+  { count: 16, label: 'Full — 16 points', blurb: 'About 45 seconds. Noticeably steadier squares.' },
 ]
 
 /**
@@ -39,7 +43,25 @@ const OVERSCAN = 0.06
 /** Keep targets from landing under the browser chrome or off-screen. */
 const VIEWPORT_MARGIN_PX = 28
 
-const SETTLE_MS = 700 // let the eye land on the dot before sampling
+/**
+ * Posture prompts, applied in blocks across the sequence.
+ *
+ * A model fitted while the head never moves has no way to tell a head turn from
+ * a change of gaze, so the moment the player shifts even a few degrees the
+ * mapping falls apart — measured, that is the difference between every square
+ * landing and none of them. Asking for a few small, deliberate shifts gives the
+ * fit the variation it needs to learn the correction. The movements are
+ * intentionally slight; large ones trade away accuracy at rest.
+ */
+const POSTURE_PHASES = [
+  'Sit however is comfortable — relaxed, not frozen',
+  'Now lean a little to one side, and stay there',
+  'Now sit back slightly, as if settling in',
+] as const
+
+const SETTLE_MS = 800 // let the eye land on the dot before sampling
+/** Time given to actually change posture before sampling resumes. */
+const POSTURE_CHANGE_MS = 2200
 // Keep sampling a point until this many *valid* (eyes-open, face-present) frames
 // land, or the attempt cap is hit — so a blink mid-point costs a few extra
 // frames instead of injecting garbage into the fit.
@@ -55,29 +77,48 @@ interface Target {
 }
 
 /**
- * Lay out the targets as an n x n grid over the overscanned board rect, walked
- * in serpentine order so consecutive dots are neighbours — shorter saccades mean
- * the eye settles faster and the whole sequence stays under a minute.
+ * Lay out the targets as an n x n grid over the overscanned board rect.
+ *
+ * The order is scattered rather than row-by-row, and that matters more than it
+ * looks: posture changes happen in blocks, so if the dots also advanced in
+ * spatial order, head pose would move in lockstep with vertical gaze and the fit
+ * could not tell the two apart. Scattering means each posture block covers a
+ * spread of the board, leaving the two independent.
  */
 function buildTargets(geom: BoardGeometry, count: PointCount): Target[] {
   const n = Math.round(Math.sqrt(count))
-  const rows: Target[][] = []
+  const grid: Target[] = []
 
   for (let r = 0; r < n; r++) {
-    const row: Target[] = []
     for (let c = 0; c < n; c++) {
       const fx = -OVERSCAN + (c / (n - 1)) * (1 + 2 * OVERSCAN)
       const fy = -OVERSCAN + (r / (n - 1)) * (1 + 2 * OVERSCAN)
       const p = boardFractionToViewport(geom, fx, fy)
-      row.push({
+      grid.push({
         x: Math.max(VIEWPORT_MARGIN_PX, Math.min(window.innerWidth - VIEWPORT_MARGIN_PX, p.x)),
         y: Math.max(VIEWPORT_MARGIN_PX, Math.min(window.innerHeight - VIEWPORT_MARGIN_PX, p.y)),
       })
     }
-    rows.push(r % 2 === 1 ? row.reverse() : row)
   }
 
-  return rows.flat()
+  // A fixed stride coprime with the grid size visits every cell exactly once
+  // while never taking two adjacent cells in a row. Deterministic, so the
+  // sequence is identical every run and reproducible when something looks off.
+  const stride = grid.length % 7 === 0 ? 5 : 7
+  const ordered: Target[] = []
+  for (let i = 0; i < grid.length; i++) {
+    ordered.push(grid[(i * stride) % grid.length])
+  }
+  return ordered
+}
+
+/** Which posture block a point belongs to, and the prompt shown for it. */
+function postureForPoint(index: number, total: number): { phase: number; hint: string } {
+  const phase = Math.min(
+    POSTURE_PHASES.length - 1,
+    Math.floor((index / Math.max(1, total)) * POSTURE_PHASES.length),
+  )
+  return { phase, hint: POSTURE_PHASES[phase] }
 }
 
 /** Plain-language verdict on a fitted model, in units the player cares about. */
@@ -117,6 +158,9 @@ export default function CalibrationPage() {
   const [started, setStarted] = useState(false)
   const [targets, setTargets] = useState<Target[]>([])
   const [currentPoint, setCurrentPoint] = useState(-1)
+  const [posturePhase, setPosturePhase] = useState(0)
+  /** True while the player is being given a moment to change posture. */
+  const [shifting, setShifting] = useState(false)
   const [quality, setQuality] = useState<CalibrationQuality | null>(null)
   const [isComplete, setIsComplete] = useState(false)
   const [fitFailed, setFitFailed] = useState(false)
@@ -178,8 +222,25 @@ export default function CalibrationPage() {
       await sleep(60)
 
       const samples: CalibrationSample[] = []
+      let phase = -1
       for (let i = 0; i < points.length; i++) {
         if (!mountedRef.current) return
+
+        // Entering a new posture block: hide the dot, show the instruction, and
+        // wait. Sampling through the movement itself would pair a settled gaze
+        // target with a head still in transit.
+        const posture = postureForPoint(i, points.length)
+        if (posture.phase !== phase) {
+          phase = posture.phase
+          setPosturePhase(phase)
+          if (i > 0) {
+            setShifting(true)
+            await sleep(POSTURE_CHANGE_MS)
+            if (!mountedRef.current) return
+            setShifting(false)
+          }
+        }
+
         setCurrentPoint(i)
         await sleep(SETTLE_MS)
 
@@ -217,6 +278,8 @@ export default function CalibrationPage() {
     setFitFailed(false)
     setQuality(null)
     setCurrentPoint(-1)
+    setPosturePhase(0)
+    setShifting(false)
     setTargets([])
     // Re-run the sequence; the tracker and camera are already live.
     requestAnimationFrame(() => {
@@ -333,7 +396,27 @@ export default function CalibrationPage() {
                     label="Fitted on"
                     value={`${quality.sampleCount} samples · ${quality.pointCount} points`}
                   />
+                  <Row
+                    label="Head compensation"
+                    value={
+                      quality.headCompensation
+                        ? `Learned (${quality.headSpreadDeg.toFixed(1)}° of movement)`
+                        : `Not learned (only ${quality.headSpreadDeg.toFixed(1)}°)`
+                    }
+                    valueClass={
+                      quality.headCompensation ? 'text-green-400' : 'text-yellow-400'
+                    }
+                  />
                 </div>
+
+                {!quality.headCompensation && (
+                  <p className="text-xs text-yellow-400 text-left">
+                    Your head stayed almost perfectly still, so the model couldn’t
+                    learn to correct for head movement — tracking will drift as soon
+                    as you shift in your seat. Redo it and let yourself move a
+                    little at each prompt.
+                  </p>
+                )}
 
                 <div className="flex gap-3">
                   <Button
@@ -368,8 +451,10 @@ export default function CalibrationPage() {
               <h1 className="text-3xl font-bold text-foreground">Calibrate eye tracking</h1>
               <p className="text-muted-foreground">
                 Dots will appear across the chessboard. Look straight at each one
-                and keep your head still — the model is fitted to your eyes, your
-                seating position and this screen.
+                and <span className="text-foreground font-medium">sit the way you
+                normally would</span> — relaxed, not frozen. Small natural
+                movement is wanted here: it is what teaches the model to correct
+                for your head, so tracking survives you shifting in your seat.
               </p>
             </div>
 
@@ -396,6 +481,11 @@ export default function CalibrationPage() {
             <p className="text-xs text-muted-foreground">
               Your camera turns on when you press start. Video never leaves this device.
             </p>
+            <p className="text-xs text-muted-foreground">
+              Calibration is matched to the board at full size. Press{' '}
+              <kbd className="px-1 py-0.5 rounded border border-border bg-muted font-mono">F</kbd>{' '}
+              in the game for focus mode to play at exactly this size.
+            </p>
           </motion.div>
         </div>
       ) : !gaze.isReady ? (
@@ -408,11 +498,20 @@ export default function CalibrationPage() {
         </div>
       ) : (
         <>
-          <div className="fixed top-6 left-1/2 -translate-x-1/2 z-20 text-center space-y-1">
-            <h1 className="text-xl font-bold text-foreground">Follow the dot</h1>
-            <p className="text-sm text-muted-foreground">
-              {`Point ${Math.max(currentPoint + 1, 1)} of ${targets.length || pointCount} — keep your head still`}
+          <div className="fixed top-6 left-1/2 -translate-x-1/2 z-20 text-center space-y-1 px-4">
+            <h1 className="text-xl font-bold text-foreground">
+              {shifting ? 'Change position' : 'Follow the dot'}
+            </h1>
+            <p
+              className={`text-sm ${shifting ? 'text-primary font-medium' : 'text-muted-foreground'}`}
+            >
+              {POSTURE_PHASES[posturePhase]}
             </p>
+            {!shifting && (
+              <p className="text-xs text-muted-foreground/70">
+                {`Point ${Math.max(currentPoint + 1, 1)} of ${targets.length || pointCount}`}
+              </p>
+            )}
             <div className="mx-auto h-1 w-48 rounded-full bg-muted overflow-hidden">
               <motion.div
                 className="h-full bg-primary"
@@ -425,7 +524,7 @@ export default function CalibrationPage() {
             </div>
           </div>
 
-          {currentPoint >= 0 && targets[currentPoint] && (
+          {currentPoint >= 0 && targets[currentPoint] && !shifting && (
             <motion.div
               key={currentPoint}
               className="fixed z-20"
@@ -475,13 +574,26 @@ function Row({
  * pixel — but matching its shape keeps the remapping close to the identity.
  */
 function ReferenceBoard({ dimmed }: { dimmed: boolean }) {
+  // Measured exactly as the game board is, in a full-viewport container — so
+  // calibration targets span the same visual angle the board will occupy in
+  // focus mode. Calibrating on a board of a different size is the single
+  // fastest way to ruin accuracy: the play-time gaze angles then fall outside
+  // the range the model ever saw.
+  const { ref: areaRef, size } = useMaxSquareSize(MAX_BOARD_PX)
+
   return (
-    <div className="fixed inset-0 z-0 flex items-center justify-center p-3 pointer-events-none">
+    <div
+      ref={areaRef}
+      // `bottom-6` reserves exactly the height the game board gives its status
+      // line, so this measures to the same box the board does in focus mode and
+      // the two geometries match rather than merely resembling each other.
+      className="fixed inset-x-0 top-0 bottom-6 z-0 flex items-center justify-center overflow-hidden pointer-events-none"
+    >
       <div
         className={`rounded-lg overflow-hidden border-2 border-primary/20 transition-opacity duration-300 ${
           dimmed ? 'opacity-20' : 'opacity-60'
         }`}
-        style={{ width: 'min(100%, calc(100vh - 150px), 1180px)' }}
+        style={{ width: size || undefined, visibility: size ? 'visible' : 'hidden' }}
       >
         <div className="grid" style={{ gridTemplateColumns: `repeat(${BOARD_SIZE}, 1fr)` }}>
           {Array.from({ length: BOARD_SIZE * BOARD_SIZE }, (_, i) => {

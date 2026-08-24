@@ -18,6 +18,10 @@ interface SquareProps {
   dwellProgress?: number
   /** 0..1 confidence in that square, which fades the ring when it is weak. */
   dwellConfidence?: number
+  /** File letter, drawn in-square on the bottom rank only. */
+  fileLabel?: string
+  /** Rank number, drawn in-square on the a-file only. */
+  rankLabel?: string
 }
 
 export default function Square({
@@ -32,6 +36,8 @@ export default function Square({
   onClick,
   dwellProgress = 0,
   dwellConfidence = 1,
+  fileLabel,
+  rankLabel,
 }: SquareProps) {
   const baseColor = isLight ? 'bg-card' : 'bg-muted'
   const hoverColor = isLight ? 'hover:bg-primary/20' : 'hover:bg-primary/30'
@@ -55,6 +61,29 @@ export default function Square({
         cursor-pointer
       `}
     >
+      {/* Coordinates are drawn inside the edge squares rather than in gutters
+          around the board. The gutters cost ~36px of layout in both axes, and on
+          a height-constrained screen that is the difference between the board
+          fitting at one square size and the next one down. */}
+      {rankLabel && (
+        <span
+          aria-hidden
+          className="absolute left-[4cqmin] top-[2cqmin] font-semibold text-muted-foreground/70 select-none pointer-events-none"
+          style={{ fontSize: '13cqmin', lineHeight: 1 }}
+        >
+          {rankLabel}
+        </span>
+      )}
+      {fileLabel && (
+        <span
+          aria-hidden
+          className="absolute right-[4cqmin] bottom-[2cqmin] font-semibold text-muted-foreground/70 select-none pointer-events-none uppercase"
+          style={{ fontSize: '13cqmin', lineHeight: 1 }}
+        >
+          {fileLabel}
+        </span>
+      )}
+
       {/* Gaze dwell progress ring. Its opacity tracks confidence, so a square
           the tracker is only half-sure about looks half-sure rather than
           identical to a certain one. */}
@@ -63,8 +92,7 @@ export default function Square({
           className="absolute inset-0 pointer-events-none rounded-sm"
           style={{
             background: `conic-gradient(rgba(168,85,247,${0.2 + 0.45 * Math.max(0, Math.min(1, dwellConfidence))}) ${dwellProgress * 360}deg, transparent 0deg)`,
-            WebkitMaskImage:
-              'radial-gradient(circle, transparent 62%, black 64%)',
+            WebkitMaskImage: 'radial-gradient(circle, transparent 62%, black 64%)',
             maskImage: 'radial-gradient(circle, transparent 62%, black 64%)',
           }}
         />

@@ -41,6 +41,15 @@ export interface CalibrationQuality {
   squareSizePx: number
   sampleCount: number
   pointCount: number
+  /**
+   * Whether the fit was able to learn head compensation. It can only do so if
+   * the head actually moved a little while calibrating — a pose that never
+   * varies gives the head terms no signal, they get dropped as constant, and the
+   * model is then accurate only for as long as the player holds that exact pose.
+   */
+  headCompensation: boolean
+  /** How much the head actually varied while calibrating, in degrees. */
+  headSpreadDeg: number
 }
 
 export interface CalibrationModel {
@@ -102,6 +111,17 @@ export function basisFromFeature(f: GazeFeature): number[] {
   ]
 }
 
+/**
+ * How much the head must have moved during calibration, in radians, for the fit
+ * to have learned anything about compensating for it. Roughly 0.7 degrees.
+ *
+ * Measured from the samples rather than inferred from which basis columns
+ * survived the constant-column check: the interaction terms (`ex * yaw` and
+ * friends) vary whenever the *eye* does, so they look alive even when the head
+ * never moved at all, and would report compensation that does not exist.
+ */
+const MIN_HEAD_SPREAD_RAD = 0.012
+
 export const N_BASIS_TERMS = basisFromFeature({
   ex: 0,
   ey: 0,
@@ -156,6 +176,7 @@ function toQuality(
   squareSizePx: number,
   samples: CalibrationSample[],
 ): CalibrationQuality {
+  const headSpread = headPoseSpread(samples)
   return {
     medianErrorPx: stats.medianErrorPx,
     p90ErrorPx: stats.p90ErrorPx,
@@ -165,7 +186,28 @@ function toQuality(
     squareSizePx,
     sampleCount: samples.length,
     pointCount: new Set(samples.map((s) => s.pointIndex)).size,
+    headSpreadDeg: (headSpread * 180) / Math.PI,
+    headCompensation: headSpread >= MIN_HEAD_SPREAD_RAD,
   }
+}
+
+/**
+ * Spread of head orientation across the calibration samples, in radians. The
+ * larger of the yaw and pitch standard deviations — either axis varying is
+ * enough for the fit to separate head movement from gaze.
+ */
+function headPoseSpread(samples: CalibrationSample[]): number {
+  if (samples.length < 2) return 0
+  const sd = (values: number[]) => {
+    const mean = values.reduce((a, b) => a + b, 0) / values.length
+    const variance =
+      values.reduce((acc, v) => acc + (v - mean) * (v - mean), 0) / values.length
+    return Math.sqrt(variance)
+  }
+  return Math.max(
+    sd(samples.map((s) => s.feature.yaw)),
+    sd(samples.map((s) => s.feature.pitch)),
+  )
 }
 
 /** Map a descriptor to a viewport point using a fitted model. */

@@ -21,6 +21,12 @@ const FACE_LOST_MS = 1000
  */
 const DRIFT_WARN_MS = 1200
 const DRIFT_THRESHOLD = 0.5
+/**
+ * Board-size change past which the calibration should be redone. Below this the
+ * affine re-anchoring holds up; above it, play-time gaze angles fall outside the
+ * range the model was fitted over and accuracy degrades sharply.
+ */
+const BOARD_RESIZE_TOLERANCE = 0.15
 
 export interface UseGazeTracking {
   /** Attach to the <video> element that shows the webcam feed. */
@@ -36,6 +42,8 @@ export interface UseGazeTracking {
   calibrationScore: number
   /** True while the player has drifted out of the pose they calibrated at. */
   driftWarning: boolean
+  /** True when the board has been resized enough to warrant recalibrating. */
+  boardResized: boolean
   /** Request camera + start the detection loop. Idempotent. */
   start: () => Promise<void>
   /** Snapshot the current descriptor against a known target. */
@@ -75,6 +83,7 @@ export function useGazeTracking(): UseGazeTracking {
   const [calibrationQuality, setCalibrationQuality] = useState<CalibrationQuality | null>(null)
   const [calibrationScore, setCalibrationScore] = useState(0)
   const [driftWarning, setDriftWarning] = useState(false)
+  const [boardResized, setBoardResized] = useState(false)
   const [state, setState] = useState<EyeTrackingState>({
     status: 'inactive',
     gazePoint: { x: 0, y: 0, confidence: 0 },
@@ -132,6 +141,10 @@ export function useGazeTracking(): UseGazeTracking {
         driftSinceRef.current = null
         setDriftWarning((prev) => (prev ? false : prev))
       }
+
+      const scale = frame.boardScale
+      const resized = scale !== null && Math.abs(scale - 1) > BOARD_RESIZE_TOLERANCE
+      setBoardResized((prev) => (prev === resized ? prev : resized))
 
       if (frame.facePresent) lastFaceAtRef.current = now
       const faceLost = now - lastFaceAtRef.current > FACE_LOST_MS
@@ -262,6 +275,7 @@ export function useGazeTracking(): UseGazeTracking {
     calibrationQuality,
     calibrationScore,
     driftWarning,
+    boardResized,
     start,
     makeSample,
     calibrate,

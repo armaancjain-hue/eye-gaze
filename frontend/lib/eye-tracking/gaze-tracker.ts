@@ -22,7 +22,12 @@ import {
   type CalibrationQuality,
   type CalibrationSample,
 } from './calibration'
-import { getBoardGeometry, remapForBoard, toBoardRect } from './board-mapping'
+import {
+  boardScaleRatio,
+  getBoardGeometry,
+  remapForBoard,
+  toBoardRect,
+} from './board-mapping'
 
 /**
  * The client-side gaze pipeline, end to end:
@@ -67,6 +72,8 @@ export interface FrameResult {
   calibrated: boolean
   /** 0..1 how far outside the calibrated range this frame's descriptor sits. */
   novelty: number
+  /** Board size now vs. at calibration time; 1 means unchanged, null if unknown. */
+  boardScale: number | null
 }
 
 /**
@@ -174,6 +181,8 @@ export class GazeTracker {
 
   /** Whether the latest frame is clean enough to calibrate against. */
   private lastReliable = false
+  /** Most recent board-size ratio vs. calibration, for the UI to warn on. */
+  private lastBoardScale: number | null = null
 
   get hasCalibration(): boolean {
     return this.calibration !== null
@@ -246,6 +255,7 @@ export class GazeTracker {
         confidence: 0,
         calibrated: this.hasCalibration,
         novelty: 0,
+        boardScale: this.lastBoardScale,
       }
     }
 
@@ -261,11 +271,14 @@ export class GazeTracker {
     let point: { x: number; y: number }
     let novelty = 0
     if (this.calibration) {
+      const geometry = getBoardGeometry(timestampMs)
       point = predictGaze(this.calibration, feature)
-      point = remapForBoard(point, this.calibration.board, getBoardGeometry(timestampMs))
+      point = remapForBoard(point, this.calibration.board, geometry)
       novelty = gazeNovelty(this.calibration, feature)
+      this.lastBoardScale = boardScaleRatio(this.calibration.board, geometry)
     } else {
       point = previewGaze(feature, width, height)
+      this.lastBoardScale = null
     }
 
     const clampedX = Math.max(0, Math.min(width, point.x))
@@ -305,6 +318,7 @@ export class GazeTracker {
       confidence,
       calibrated: this.hasCalibration,
       novelty,
+      boardScale: this.lastBoardScale,
     }
   }
 

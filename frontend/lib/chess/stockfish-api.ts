@@ -2,17 +2,15 @@ import { GameState } from './types'
 import { boardToFen } from './fen'
 
 /**
- * Client for the backend Stockfish endpoint.
+ * Client for the Stockfish endpoint, which is a route handler in this same
+ * Next.js app (app/api/ai-move). Being same-origin means no CORS, no second
+ * deployment, and no separate URL to configure per environment — the relative
+ * path is correct in local dev, in previews and in production alike.
  *
- * The endpoint URL and the request/response shapes are centralized here so that
- * matching them to the actual backend contract is a one-file change.
- *
- * Configure the URL via NEXT_PUBLIC_STOCKFISH_URL (defaults to the local
- * backend on :3000). Request payload sends the position as FEN plus difficulty
- * hints; the response parser is deliberately tolerant of field naming.
+ * The request/response shapes are centralized here so that matching them to the
+ * route's contract stays a one-file change.
  */
-const ENDPOINT =
-  process.env.NEXT_PUBLIC_STOCKFISH_URL ?? 'http://localhost:3004/ai-move'
+const ENDPOINT = '/api/ai-move'
 
 export interface EngineResult {
   /** Best move in UCI (e.g. "e2e4"). Empty string means no move (game over). */
