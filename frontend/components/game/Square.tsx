@@ -16,6 +16,8 @@ interface SquareProps {
   onClick: () => void
   /** 0..1 gaze-dwell progress toward activating this square, if any. */
   dwellProgress?: number
+  /** 0..1 confidence in that square, which fades the ring when it is weak. */
+  dwellConfidence?: number
 }
 
 export default function Square({
@@ -29,6 +31,7 @@ export default function Square({
   isLegalMove,
   onClick,
   dwellProgress = 0,
+  dwellConfidence = 1,
 }: SquareProps) {
   const baseColor = isLight ? 'bg-card' : 'bg-muted'
   const hoverColor = isLight ? 'hover:bg-primary/20' : 'hover:bg-primary/30'
@@ -52,12 +55,14 @@ export default function Square({
         cursor-pointer
       `}
     >
-      {/* Gaze dwell progress ring */}
+      {/* Gaze dwell progress ring. Its opacity tracks confidence, so a square
+          the tracker is only half-sure about looks half-sure rather than
+          identical to a certain one. */}
       {dwellProgress > 0 && (
         <div
           className="absolute inset-0 pointer-events-none rounded-sm"
           style={{
-            background: `conic-gradient(rgba(168,85,247,0.55) ${dwellProgress * 360}deg, transparent 0deg)`,
+            background: `conic-gradient(rgba(168,85,247,${0.2 + 0.45 * Math.max(0, Math.min(1, dwellConfidence))}) ${dwellProgress * 360}deg, transparent 0deg)`,
             WebkitMaskImage:
               'radial-gradient(circle, transparent 62%, black 64%)',
             maskImage: 'radial-gradient(circle, transparent 62%, black 64%)',

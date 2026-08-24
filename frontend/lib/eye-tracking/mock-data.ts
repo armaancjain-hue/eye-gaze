@@ -15,9 +15,11 @@ export const createInitialEyeTrackingState = (): EyeTrackingState => {
 }
 
 export const DEFAULT_ACCESSIBILITY_SETTINGS: AccessibilitySettings = {
-  // 550ms is a calmer default: long enough that a stray glance across a square
-  // doesn't select it, short enough to stay responsive. Tunable in settings.
-  dwellTime: 550,
+  // 600ms sits in the middle of the usable dwell band: long enough that a glance
+  // passing over a square can't select it (a saccade plus a brief fixation is
+  // well under half of it), short enough that deliberate selection doesn't feel
+  // like waiting. Tunable between 500 and 800ms in settings.
+  dwellTime: 600,
   // Fairly heavy smoothing by default so the cursor sits steady; users on a good
   // webcam can lower it for snappier tracking.
   smoothing: 70,

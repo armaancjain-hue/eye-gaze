@@ -1,186 +1,207 @@
+import type { GazeFeature } from './features'
+import { FEATURE_KEYS } from './features'
+import {
+  fitTwoAxisModel,
+  noveltyScore,
+  predictTwoAxis,
+  type TwoAxisModel,
+  type ValidationStats,
+} from './regression'
+import type { BoardRect } from './board-mapping'
+
 /**
- * Gaze calibration model.
+ * Personalised gaze calibration.
  *
- * We can't map raw eye geometry to screen coordinates without knowing how a
- * particular person, sitting at a particular distance, maps iris position to
- * where they're actually looking. So we collect (rawFeature -> knownScreenPoint)
- * samples during calibration and fit two ridge-regularised least-squares models
- * (one for X, one for Y) over a small polynomial expansion of the raw feature.
+ * Nobody's eyes map to a screen the same way — it depends on their face
+ * geometry, where the camera sits, how far back they lean and how the board is
+ * laid out. So we collect (feature -> known target) pairs while the user looks
+ * at a grid of dots over the chessboard, fit a regularised model to *them*, and
+ * store it. Everything downstream consumes the fitted prediction; the raw iris
+ * offset never reaches the board.
  */
 
-/** The raw, per-frame signal extracted from the face mesh (see gaze-tracker). */
-export interface RawGazeFeature {
-  /** Iris horizontal offset (mirror-corrected), averaged over both eyes, smoothed. */
-  gx: number
-  /** Iris vertical offset, averaged over both eyes, smoothed. */
-  gy: number
-  /** Head forward-vector X component (yaw proxy) from the transform matrix. */
-  headX: number
-  /** Head forward-vector Y component (pitch proxy) from the transform matrix. */
-  headY: number
+export interface CalibrationSample {
+  feature: GazeFeature
+  /** Target position in viewport pixels. */
+  screenX: number
+  screenY: number
+  /** Which calibration dot this sample belongs to — the CV grouping key. */
+  pointIndex: number
+}
+
+export interface CalibrationQuality {
+  /** Held-out median error in CSS pixels. */
+  medianErrorPx: number
+  p90ErrorPx: number
+  medianErrorXPx: number
+  medianErrorYPx: number
+  /** Held-out median error expressed in board squares — the number that matters. */
+  medianErrorSquares: number
+  /** Square size the error was expressed against. */
+  squareSizePx: number
+  sampleCount: number
+  pointCount: number
 }
 
 export interface CalibrationModel {
-  /** Weights mapping the expanded feature to screen X (in CSS pixels). */
-  wx: number[]
-  /** Weights mapping the expanded feature to screen Y (in CSS pixels). */
-  wy: number[]
-  /** Screen size the model was fitted against, used to detect resizes. */
-  screenWidth: number
-  screenHeight: number
-  /** Mean residual error in pixels over the training samples. */
-  rmsError: number
+  version: 4
+  model: TwoAxisModel
+  quality: CalibrationQuality
+  /** Board rect at calibration time, so predictions can follow board resizes. */
+  board: BoardRect | null
+  viewport: { width: number; height: number }
+  createdAt: number
 }
 
-export interface CalibrationSample {
-  feature: RawGazeFeature
-  screenX: number
-  screenY: number
-}
-
-// v3: gaze uses source-smoothed, mirror-corrected iris offset. Earlier models
-// were fitted against different feature semantics, so they're ignored and the
-// user recalibrates once.
-const STORAGE_KEY = 'eye-gaze-chess.calibration.v3'
+// v4: 11-dim descriptor + standardised ridge + residual anchors. Models stored
+// by earlier versions describe different features entirely, so they are dropped
+// and the user recalibrates once.
+const STORAGE_KEY = 'eye-gaze-chess.calibration.v4'
 
 /**
- * Expand the 4-dim raw feature into an 8-dim basis with quadratic + interaction
- * terms. The quadratic terms let the model bend near the screen edges, where the
- * iris/screen relationship is most non-linear.
+ * Polynomial basis over the descriptor.
+ *
+ * Linear terms carry most of the signal; the squared terms let the mapping bend
+ * near the screen edges (where the eye/screen relationship is least linear), and
+ * the interaction terms are what let head pose *correct* the eye signal instead
+ * of merely being added to it — looking at the same square with the head turned
+ * 10 degrees produces a different iris offset, and `ex * yaw` is the term that
+ * knows it.
  */
-export function expandFeature(f: RawGazeFeature): number[] {
+export function basisFromFeature(f: GazeFeature): number[] {
+  const { ex, ey, eyLid, vergence, aperture, yaw, pitch, roll, headX, headY, headScale } = f
   return [
-    1,
-    f.gx,
-    f.gy,
-    f.gx * f.gy,
-    f.gx * f.gx,
-    f.gy * f.gy,
-    f.headX,
-    f.headY,
+    // Linear
+    ex,
+    ey,
+    eyLid,
+    vergence,
+    aperture,
+    yaw,
+    pitch,
+    roll,
+    headX,
+    headY,
+    headScale,
+    // Curvature
+    ex * ex,
+    ey * ey,
+    eyLid * eyLid,
+    // Eye-eye interaction (the mapping is not separable across axes)
+    ex * ey,
+    ex * eyLid,
+    // Head compensation
+    ex * yaw,
+    ey * pitch,
+    eyLid * pitch,
+    yaw * pitch,
+    ex * headX,
+    ey * headY,
+    ex * headScale,
+    ey * headScale,
   ]
 }
 
-const N_TERMS = 8
+export const N_BASIS_TERMS = basisFromFeature({
+  ex: 0,
+  ey: 0,
+  eyLid: 0,
+  vergence: 0,
+  aperture: 0,
+  yaw: 0,
+  pitch: 0,
+  roll: 0,
+  headX: 0,
+  headY: 0,
+  headScale: 0,
+}).length
 
-/**
- * Solve the square linear system A·x = b in place using Gaussian elimination
- * with partial pivoting. Returns null if the matrix is singular.
- */
-function solveLinearSystem(A: number[][], b: number[]): number[] | null {
-  const n = b.length
-  // Work on copies so callers keep their inputs.
-  const m = A.map((row) => row.slice())
-  const y = b.slice()
+/** Minimum samples for a fit that can also be honestly validated. */
+export const MIN_CALIBRATION_SAMPLES = N_BASIS_TERMS + 4
 
-  for (let col = 0; col < n; col++) {
-    // Partial pivot: find the row with the largest magnitude in this column.
-    let pivot = col
-    for (let row = col + 1; row < n; row++) {
-      if (Math.abs(m[row][col]) > Math.abs(m[pivot][col])) pivot = row
-    }
-    if (Math.abs(m[pivot][col]) < 1e-12) return null
-    if (pivot !== col) {
-      ;[m[col], m[pivot]] = [m[pivot], m[col]]
-      ;[y[col], y[pivot]] = [y[pivot], y[col]]
-    }
-
-    // Eliminate below.
-    for (let row = col + 1; row < n; row++) {
-      const factor = m[row][col] / m[col][col]
-      if (factor === 0) continue
-      for (let k = col; k < n; k++) m[row][k] -= factor * m[col][k]
-      y[row] -= factor * y[col]
-    }
-  }
-
-  // Back-substitution.
-  const x = new Array(n).fill(0)
-  for (let row = n - 1; row >= 0; row--) {
-    let sum = y[row]
-    for (let k = row + 1; k < n; k++) sum -= m[row][k] * x[k]
-    x[row] = sum / m[row][row]
-  }
-  return x
-}
-
-/**
- * Fit weights for a single output (X or Y) via ridge regression:
- *   w = (FᵀF + λI)⁻¹ Fᵀ s
- * The ridge term λ keeps the fit stable when calibration points are few or
- * nearly collinear (e.g. the user barely moved their eyes).
- */
-function fitAxis(design: number[][], targets: number[], lambda: number): number[] | null {
-  const A: number[][] = Array.from({ length: N_TERMS }, () => new Array(N_TERMS).fill(0))
-  const b: number[] = new Array(N_TERMS).fill(0)
-
-  for (let s = 0; s < design.length; s++) {
-    const row = design[s]
-    const t = targets[s]
-    for (let i = 0; i < N_TERMS; i++) {
-      b[i] += row[i] * t
-      for (let j = 0; j < N_TERMS; j++) A[i][j] += row[i] * row[j]
-    }
-  }
-  // Ridge: add λ to the diagonal (but not the bias term, index 0).
-  for (let i = 1; i < N_TERMS; i++) A[i][i] += lambda
-
-  return solveLinearSystem(A, b)
+export interface FitOptions {
+  viewportWidth: number
+  viewportHeight: number
+  board: BoardRect | null
+  squareSizePx: number
 }
 
 export function fitCalibration(
   samples: CalibrationSample[],
-  screenWidth: number,
-  screenHeight: number,
-  lambda = 1e-3,
+  opts: FitOptions,
 ): CalibrationModel | null {
-  if (samples.length < N_TERMS) return null
+  if (samples.length < MIN_CALIBRATION_SAMPLES) return null
 
-  const design = samples.map((s) => expandFeature(s.feature))
+  const rows = samples.map((s) => basisFromFeature(s.feature))
   const targetsX = samples.map((s) => s.screenX)
   const targetsY = samples.map((s) => s.screenY)
+  const groups = samples.map((s) => s.pointIndex)
 
-  const wx = fitAxis(design, targetsX, lambda)
-  const wy = fitAxis(design, targetsY, lambda)
-  if (!wx || !wy) return null
+  const fit = fitTwoAxisModel(rows, targetsX, targetsY, groups)
+  if (!fit) return null
 
-  // Compute RMS error over the training set for a quality readout.
-  let sqErr = 0
-  for (let s = 0; s < samples.length; s++) {
-    const row = design[s]
-    let px = 0
-    let py = 0
-    for (let i = 0; i < N_TERMS; i++) {
-      px += row[i] * wx[i]
-      py += row[i] * wy[i]
-    }
-    sqErr += (px - targetsX[s]) ** 2 + (py - targetsY[s]) ** 2
+  const squareSizePx = opts.squareSizePx > 0 ? opts.squareSizePx : 1
+  return {
+    version: 4,
+    model: fit.model,
+    quality: toQuality(fit.stats, squareSizePx, samples),
+    board: opts.board,
+    viewport: { width: opts.viewportWidth, height: opts.viewportHeight },
+    createdAt: Date.now(),
   }
-  const rmsError = Math.sqrt(sqErr / samples.length)
-
-  return { wx, wy, screenWidth, screenHeight, rmsError }
 }
 
-/** Map a raw feature to a screen point using a fitted model. */
+function toQuality(
+  stats: ValidationStats,
+  squareSizePx: number,
+  samples: CalibrationSample[],
+): CalibrationQuality {
+  return {
+    medianErrorPx: stats.medianErrorPx,
+    p90ErrorPx: stats.p90ErrorPx,
+    medianErrorXPx: stats.medianErrorXPx,
+    medianErrorYPx: stats.medianErrorYPx,
+    medianErrorSquares: stats.medianErrorPx / squareSizePx,
+    squareSizePx,
+    sampleCount: samples.length,
+    pointCount: new Set(samples.map((s) => s.pointIndex)).size,
+  }
+}
+
+/** Map a descriptor to a viewport point using a fitted model. */
 export function predictGaze(
   model: CalibrationModel,
-  feature: RawGazeFeature,
+  feature: GazeFeature,
 ): { x: number; y: number } {
-  const row = expandFeature(feature)
-  let x = 0
-  let y = 0
-  for (let i = 0; i < N_TERMS; i++) {
-    x += row[i] * model.wx[i]
-    y += row[i] * model.wy[i]
-  }
-  return { x, y }
+  return predictTwoAxis(model.model, basisFromFeature(feature))
+}
+
+/**
+ * 0..1 measure of how far the current descriptor sits outside the range the
+ * model was calibrated over — the player has leaned in, turned, or is sitting
+ * differently than they were. The prediction is extrapolation at that point, so
+ * this is folded into the reported confidence rather than hidden.
+ */
+export function gazeNovelty(model: CalibrationModel, feature: GazeFeature): number {
+  return noveltyScore(model.model.x, basisFromFeature(feature))
+}
+
+/**
+ * A 0..1 read on how much the *square classification* can be trusted given the
+ * calibration alone: error well under half a square is excellent, error of a
+ * full square means the model cannot tell neighbours apart.
+ */
+export function qualityScore(quality: CalibrationQuality): number {
+  const e = quality.medianErrorSquares
+  if (!Number.isFinite(e)) return 0
+  return Math.max(0, Math.min(1, 1 - (e - 0.25) / 0.85))
 }
 
 export function saveCalibration(model: CalibrationModel): void {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(model))
   } catch {
-    /* localStorage may be unavailable (private mode); calibration is per-session then. */
+    /* Private mode / quota: calibration simply stays session-only. */
   }
 }
 
@@ -189,7 +210,13 @@ export function loadCalibration(): CalibrationModel | null {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (!raw) return null
     const parsed = JSON.parse(raw) as CalibrationModel
-    if (!Array.isArray(parsed.wx) || parsed.wx.length !== N_TERMS) return null
+    if (parsed?.version !== 4) return null
+    const m = parsed.model
+    if (!m?.x?.weights || !m?.y?.weights) return null
+    if (m.x.weights.length !== N_BASIS_TERMS + 1) return null
+    if (m.x.mean?.length !== N_BASIS_TERMS) return null
+    if (m.x.active?.length !== N_BASIS_TERMS) return null
+    if (m.x.noveltyStd?.length !== N_BASIS_TERMS) return null
     return parsed
   } catch {
     return null
@@ -205,18 +232,25 @@ export function clearCalibration(): void {
 }
 
 /**
- * Rough uncalibrated mapping so the gaze ring still moves before calibration.
- * The gains are deliberately conservative; calibration replaces this entirely.
- * gx is already mirror-corrected upstream, so moving the head toward the
- * screen's right increases it. Both the eye-midpoint offset (gx/gy) and the head
- * forward vector (headX/headY) push the cursor the same way.
+ * Pre-calibration fallback, used *only* to draw the on-screen cursor so the user
+ * can see that tracking is alive and frame themselves in the camera. It is a
+ * crude fixed gain over the raw descriptor with no personalisation, and is
+ * deliberately never routed to square selection — that is exactly the raw-iris
+ * mapping this pipeline replaces.
  */
-export function defaultGaze(
-  feature: RawGazeFeature,
+export function previewGaze(
+  feature: GazeFeature,
   screenWidth: number,
   screenHeight: number,
 ): { x: number; y: number } {
-  const x = screenWidth * (0.5 + feature.gx * 4 + feature.headX * 1.0)
-  const y = screenHeight * (0.5 + feature.gy * 6 + feature.headY * 1.0)
+  const x = screenWidth * (0.5 + feature.ex * 4 + feature.yaw * 0.9)
+  const y = screenHeight * (0.5 + feature.ey * 6 + feature.eyLid * 1.2 + feature.pitch * 0.9)
   return { x, y }
+}
+
+/** Debug helper: flat descriptor readout, handy when tuning in the console. */
+export function describeFeature(f: GazeFeature): Record<string, number> {
+  const out: Record<string, number> = {}
+  for (const k of FEATURE_KEYS) out[k] = Number(f[k].toFixed(4))
+  return out
 }

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { GazeTracker } from './gaze-tracker'
-import type { CalibrationSample } from './calibration'
+import type { CalibrationQuality, CalibrationSample } from './calibration'
 import type { EyeTrackingState, TrackingStatus } from './types'
 
 /** A deliberate blink is eyes closed for at least this long (ms)... */
@@ -13,6 +13,14 @@ const BLINK_MAX_MS = 900
 const BLINK_REFRACTORY_MS = 700
 /** No face for this long (ms) flips status to "lost". */
 const FACE_LOST_MS = 1000
+/**
+ * How long the descriptor must sit outside its calibrated range before we tell
+ * the player. Leaning briefly or glancing away is normal and self-corrects; a
+ * sustained drift means selection has quietly stopped working and they deserve
+ * to know why rather than wondering why nothing responds.
+ */
+const DRIFT_WARN_MS = 1200
+const DRIFT_THRESHOLD = 0.5
 
 export interface UseGazeTracking {
   /** Attach to the <video> element that shows the webcam feed. */
@@ -22,12 +30,18 @@ export interface UseGazeTracking {
   isReady: boolean
   error: string | null
   hasCalibration: boolean
+  /** Cross-validated accuracy of the active calibration, if any. */
+  calibrationQuality: CalibrationQuality | null
+  /** 0..1 summary of that accuracy, in "can it pick a square" terms. */
+  calibrationScore: number
+  /** True while the player has drifted out of the pose they calibrated at. */
+  driftWarning: boolean
   /** Request camera + start the detection loop. Idempotent. */
   start: () => Promise<void>
-  /** Snapshot the current raw feature against a known screen target. */
-  makeSample: (screenX: number, screenY: number) => CalibrationSample | null
-  /** Fit + persist a calibration model. Returns RMS error in pixels, or null. */
-  calibrate: (samples: CalibrationSample[]) => number | null
+  /** Snapshot the current descriptor against a known target. */
+  makeSample: (screenX: number, screenY: number, pointIndex: number) => CalibrationSample | null
+  /** Fit + persist a calibration model. Returns its held-out quality, or null. */
+  calibrate: (samples: CalibrationSample[]) => CalibrationQuality | null
   resetCalibration: () => void
   /** Subscribe to deliberate-blink events. Returns an unsubscribe fn. */
   onBlink: (cb: () => void) => () => void
@@ -53,10 +67,14 @@ export function useGazeTracking(): UseGazeTracking {
   const closedSinceRef = useRef<number | null>(null)
   const lastBlinkAtRef = useRef(0)
   const lastFaceAtRef = useRef(0)
+  const driftSinceRef = useRef<number | null>(null)
 
   const [isReady, setIsReady] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [hasCalibration, setHasCalibration] = useState(false)
+  const [calibrationQuality, setCalibrationQuality] = useState<CalibrationQuality | null>(null)
+  const [calibrationScore, setCalibrationScore] = useState(0)
+  const [driftWarning, setDriftWarning] = useState(false)
   const [state, setState] = useState<EyeTrackingState>({
     status: 'inactive',
     gazePoint: { x: 0, y: 0, confidence: 0 },
@@ -70,6 +88,12 @@ export function useGazeTracking(): UseGazeTracking {
     return () => {
       blinkSubscribers.current.delete(cb)
     }
+  }, [])
+
+  const syncCalibration = useCallback((tracker: GazeTracker) => {
+    setHasCalibration(tracker.hasCalibration)
+    setCalibrationQuality(tracker.calibrationQuality)
+    setCalibrationScore(tracker.calibrationScore)
   }, [])
 
   const loop = useCallback(() => {
@@ -98,6 +122,15 @@ export function useGazeTracking(): UseGazeTracking {
           lastBlinkAtRef.current = now
           blinkSubscribers.current.forEach((cb) => cb())
         }
+      }
+
+      // Sustained out-of-distribution drift, debounced in both directions.
+      if (frame.calibrated && frame.facePresent && frame.novelty > DRIFT_THRESHOLD) {
+        if (driftSinceRef.current === null) driftSinceRef.current = now
+        else if (now - driftSinceRef.current > DRIFT_WARN_MS) setDriftWarning(true)
+      } else {
+        driftSinceRef.current = null
+        setDriftWarning((prev) => (prev ? false : prev))
       }
 
       if (frame.facePresent) lastFaceAtRef.current = now
@@ -140,7 +173,7 @@ export function useGazeTracking(): UseGazeTracking {
           tracker.close()
           return
         }
-        setHasCalibration(tracker.hasCalibration)
+        syncCalibration(tracker)
       }
 
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -178,26 +211,31 @@ export function useGazeTracking(): UseGazeTracking {
         setState((prev) => ({ ...prev, status: 'inactive' }))
       }
     }
-  }, [loop])
+  }, [loop, syncCalibration])
 
   const makeSample = useCallback(
-    (screenX: number, screenY: number) =>
-      trackerRef.current?.makeSample(screenX, screenY) ?? null,
+    (screenX: number, screenY: number, pointIndex: number) =>
+      trackerRef.current?.makeSample(screenX, screenY, pointIndex) ?? null,
     [],
   )
 
-  const calibrate = useCallback((samples: CalibrationSample[]) => {
-    const tracker = trackerRef.current
-    if (!tracker) return null
-    const rms = tracker.calibrate(samples)
-    setHasCalibration(tracker.hasCalibration)
-    return rms
-  }, [])
+  const calibrate = useCallback(
+    (samples: CalibrationSample[]) => {
+      const tracker = trackerRef.current
+      if (!tracker) return null
+      const quality = tracker.calibrate(samples)
+      syncCalibration(tracker)
+      return quality
+    },
+    [syncCalibration],
+  )
 
   const resetCalibration = useCallback(() => {
-    trackerRef.current?.resetCalibration()
-    setHasCalibration(false)
-  }, [])
+    const tracker = trackerRef.current
+    if (!tracker) return
+    tracker.resetCalibration()
+    syncCalibration(tracker)
+  }, [syncCalibration])
 
   const setSmoothing = useCallback((strength: number) => {
     trackerRef.current?.setSmoothing(strength)
@@ -221,6 +259,9 @@ export function useGazeTracking(): UseGazeTracking {
     isReady,
     error,
     hasCalibration,
+    calibrationQuality,
+    calibrationScore,
+    driftWarning,
     start,
     makeSample,
     calibrate,

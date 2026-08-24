@@ -14,6 +14,8 @@ interface ChessboardProps {
   dwellSquare?: BoardPosition | null
   /** 0..1 progress of the current dwell. */
   dwellProgress?: number
+  /** 0..1 confidence that the dwelled square is the one being looked at. */
+  dwellConfidence?: number
   /** True while the engine (Black) is computing its move. */
   isThinking?: boolean
 }
@@ -23,6 +25,7 @@ export default function Chessboard({
   onSquareClick,
   dwellSquare = null,
   dwellProgress = 0,
+  dwellConfidence = 1,
   isThinking = false,
 }: ChessboardProps) {
   const legalMoves = useMemo(() => {
@@ -106,6 +109,7 @@ export default function Chessboard({
                     isLegalMove={isLegalMove}
                     onClick={() => onSquareClick(rowIndex, colIndex)}
                     dwellProgress={isDwelling ? dwellProgress : 0}
+                    dwellConfidence={dwellConfidence}
                   />
                 )
               })}

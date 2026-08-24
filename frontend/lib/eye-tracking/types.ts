@@ -15,7 +15,8 @@ export interface EyeTrackingState {
 }
 
 export interface AccessibilitySettings {
-  dwellTime: number // milliseconds
+  /** How long the gaze must hold a square before it selects, 500..800ms. */
+  dwellTime: number
   /** Cursor smoothing/stability, 0 (responsive) .. 100 (very steady). */
   smoothing: number
   blinkSensitivity: 'low' | 'medium' | 'high'

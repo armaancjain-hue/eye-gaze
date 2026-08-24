@@ -4,6 +4,7 @@ import { RefObject } from 'react'
 import { motion } from 'framer-motion'
 import { Eye, AlertCircle, CheckCircle2, Video } from 'lucide-react'
 import { EyeTrackingState } from '@/lib/eye-tracking/types'
+import type { CalibrationQuality } from '@/lib/eye-tracking/calibration'
 import GazeRing from './GazeRing'
 import WebcamPreview from './WebcamPreview'
 
@@ -14,6 +15,14 @@ interface EyeTrackingPanelProps {
   isReady: boolean
   error: string | null
   onEnableCamera: () => void
+  /** Held-out accuracy of the active calibration, or null if uncalibrated. */
+  calibrationQuality?: CalibrationQuality | null
+  /** The square the gaze currently resolves to, in algebraic notation. */
+  targetSquare?: string | null
+  /** 0..1 confidence in that square. */
+  targetConfidence?: number
+  /** True while the player has drifted out of the pose they calibrated at. */
+  driftWarning?: boolean
 }
 
 export default function EyeTrackingPanel({
@@ -23,6 +32,10 @@ export default function EyeTrackingPanel({
   isReady,
   error,
   onEnableCamera,
+  calibrationQuality = null,
+  targetSquare = null,
+  targetConfidence = 0,
+  driftWarning = false,
 }: EyeTrackingPanelProps) {
   const isActive = eyeTrackingState.status === 'active'
   const statusColor = isActive ? 'text-green-400' : 'text-yellow-400'
@@ -114,7 +127,24 @@ export default function EyeTrackingPanel({
         </div>
       </div>
 
-      {/* Calibration Progress */}
+      {/* Target square — the actual output of the pipeline, shown so the player
+          can see which square is being voted for before it commits. */}
+      <div className="space-y-2">
+        <p className="text-xs font-semibold text-muted-foreground uppercase">
+          Target square
+        </p>
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-2xl font-bold font-mono text-foreground tabular-nums">
+            {targetSquare ?? '—'}
+          </span>
+          <span className="text-sm font-semibold text-primary">
+            {targetSquare ? `${Math.round(targetConfidence * 100)}%` : ''}
+          </span>
+        </div>
+      </div>
+
+      {/* Calibration state. The error is reported in board squares because that
+          is the unit that decides whether a square can be picked at all. */}
       <div className="space-y-2">
         <p className="text-xs font-semibold text-muted-foreground uppercase">
           Calibration
@@ -127,6 +157,28 @@ export default function EyeTrackingPanel({
             className="h-full bg-accent rounded-full"
           />
         </div>
+        {driftWarning && (
+          <p className="text-xs text-yellow-400 flex items-start gap-1">
+            <AlertCircle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+            <span>
+              You’ve moved since calibrating — sit back the way you were, or
+              recalibrate.
+            </span>
+          </p>
+        )}
+        {calibrationQuality ? (
+          <p className="text-xs text-muted-foreground">
+            Typical error{' '}
+            <span className="font-semibold text-foreground">
+              {calibrationQuality.medianErrorSquares.toFixed(2)} squares
+            </span>{' '}
+            · {calibrationQuality.pointCount} points
+          </p>
+        ) : (
+          <p className="text-xs text-yellow-400">
+            Not calibrated — gaze selection is off until you calibrate.
+          </p>
+        )}
       </div>
 
       {/* Blink Indicator */}

@@ -20,6 +20,7 @@ import { getBestMove } from '@/lib/chess/stockfish-api'
 import { applyUciMove } from '@/lib/chess/apply-move'
 import { useGazeTracking } from '@/lib/eye-tracking/useGazeTracking'
 import { useGazeInteraction } from '@/lib/eye-tracking/useGazeInteraction'
+import { toAlgebraic } from '@/lib/eye-tracking/board-mapping'
 
 export default function GamePage() {
   const router = useRouter()
@@ -131,10 +132,17 @@ export default function GamePage() {
     })
   }
 
-  const { dwellSquare, dwellProgress } = useGazeInteraction({
-    enabled: gaze.isReady && isHumanTurn,
+  // Gaze control requires a fitted calibration. Without one the only mapping
+  // available is the raw, un-personalised one, which cannot tell 64 squares
+  // apart — so squares stay mouse-only until the player calibrates, rather than
+  // selecting the wrong piece and looking broken.
+  const gazeControlReady = gaze.isReady && gaze.hasCalibration
+
+  const { dwellSquare, dwellProgress, confidence: dwellConfidence } = useGazeInteraction({
+    enabled: gazeControlReady && isHumanTurn,
     gazePoint: gaze.state.gazePoint,
     dwellTime: accessibility.dwellTime,
+    calibrationScore: gaze.calibrationScore,
     registerBlink: gaze.onBlink,
     onDwell: handleGazeDwell,
     onBlinkConfirm: handleBlinkConfirm,
@@ -265,6 +273,7 @@ export default function GamePage() {
             onSquareClick={handleSquareClick}
             dwellSquare={dwellSquare}
             dwellProgress={dwellProgress}
+            dwellConfidence={dwellConfidence}
             isThinking={engineThinking}
           />
         </motion.div>
@@ -293,6 +302,10 @@ export default function GamePage() {
                 isReady={gaze.isReady}
                 error={gaze.error}
                 onEnableCamera={gaze.start}
+                calibrationQuality={gaze.calibrationQuality}
+                targetSquare={dwellSquare ? toAlgebraic(dwellSquare) : null}
+                targetConfidence={dwellConfidence}
+                driftWarning={gaze.driftWarning}
               />
             </div>
             <div className="flex-1 min-h-0 overflow-hidden">
@@ -328,6 +341,10 @@ export default function GamePage() {
             isReady={gaze.isReady}
             error={gaze.error}
             onEnableCamera={gaze.start}
+            calibrationQuality={gaze.calibrationQuality}
+            targetSquare={dwellSquare ? toAlgebraic(dwellSquare) : null}
+            targetConfidence={dwellConfidence}
+            driftWarning={gaze.driftWarning}
           />
           <MoveHistoryPanel moves={gameState.moves} />
         </div>
