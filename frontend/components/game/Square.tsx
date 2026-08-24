@@ -107,7 +107,9 @@ export default function Square({
         />
       )}
 
-      {/* Piece */}
+      {/* Piece. Both colours use the same solid glyph; the colour and a contrasting
+          outline distinguish White (light) from Black (dark) and keep each side
+          legible on the dark board. */}
       {piece && (
         <motion.div
           initial={{ scale: 0, opacity: 0 }}
@@ -117,7 +119,19 @@ export default function Square({
             stiffness: 260,
             damping: 20,
           }}
-          style={{ fontSize: '70cqmin', lineHeight: 1 }}
+          style={{
+            fontSize: '70cqmin',
+            lineHeight: 1,
+            // White = bright fill with a thin dark rim; Black = dark fill with a
+            // thin light rim so it stays legible on the dark board without a glow
+            // that would make it read as white.
+            color: piece.color === 'white' ? '#f4f4f5' : '#161619',
+            WebkitTextStroke:
+              piece.color === 'white'
+                ? '0.6px rgba(0,0,0,0.45)'
+                : '1.2px rgba(226,226,232,0.92)',
+            textShadow: '0 1px 2px rgba(0,0,0,0.55)',
+          }}
           className="cursor-move select-none"
         >
           {PIECE_UNICODE[`${piece.color}_${piece.type}`]}

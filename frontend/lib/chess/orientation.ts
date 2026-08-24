@@ -12,7 +12,9 @@ import type { BoardPosition } from './types'
  */
 export type BoardOrientation = 'white-bottom' | 'white-top'
 
-export const DEFAULT_ORIENTATION: BoardOrientation = 'white-top'
+// White at the bottom is the conventional player's-eye view, and the human
+// plays White here. The board can still be flipped at runtime.
+export const DEFAULT_ORIENTATION: BoardOrientation = 'white-bottom'
 
 /**
  * Visual cell -> logical square, and its own inverse.
