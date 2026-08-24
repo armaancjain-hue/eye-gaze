@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { useRouter } from 'next/navigation'
 import { motion } from 'framer-motion'
-import { ChevronLeft, ChevronRight, Maximize2, Minimize2 } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Maximize2, Minimize2, FlipVertical2 } from 'lucide-react'
 import Chessboard from '@/components/game/Chessboard'
 import LeftSidebar from '@/components/layout/LeftSidebar'
 import EyeTrackingPanel from '@/components/eye-tracking/EyeTrackingPanel'
@@ -21,6 +21,7 @@ import { applyUciMove } from '@/lib/chess/apply-move'
 import { useGazeTracking } from '@/lib/eye-tracking/useGazeTracking'
 import { useGazeInteraction } from '@/lib/eye-tracking/useGazeInteraction'
 import { toAlgebraic } from '@/lib/eye-tracking/board-mapping'
+import { DEFAULT_ORIENTATION, type BoardOrientation } from '@/lib/chess/orientation'
 
 export default function GamePage() {
   const router = useRouter()
@@ -42,6 +43,14 @@ export default function GamePage() {
    * it does give real headroom over the error sources fixed in pixels.
    */
   const [focusMode, setFocusMode] = useState(false)
+  /**
+   * Which side is drawn at the top. Defaults to white — the player's own pieces
+   * — because that is the half of the board they look at most to pick a piece,
+   * and the upper half of the screen is where gaze tracking is most reliable:
+   * looking down narrows the eye aperture and the lid starts to occlude the
+   * iris, which is exactly the landmark the whole estimate rests on.
+   */
+  const [orientation, setOrientation] = useState<BoardOrientation>(DEFAULT_ORIENTATION)
 
   // Human plays White; the backend Stockfish plays Black.
   const isHumanTurn =
@@ -65,6 +74,9 @@ export default function GamePage() {
       if (e.key === 'f' || e.key === 'F') {
         e.preventDefault()
         setFocusMode((v) => !v)
+      } else if (e.key === 'v' || e.key === 'V') {
+        e.preventDefault()
+        setOrientation((o) => (o === 'white-top' ? 'white-bottom' : 'white-top'))
       } else if (e.key === 'Escape') {
         setFocusMode(false)
       }
@@ -250,6 +262,23 @@ export default function GamePage() {
         reducedMotion={accessibility.reducedMotion}
       />
 
+      {/* Board flip. Sits beside the focus toggle so both view controls are in
+          the same place, and is reachable without the keyboard. */}
+      <button
+        onClick={() =>
+          setOrientation((o) => (o === 'white-top' ? 'white-bottom' : 'white-top'))
+        }
+        title={
+          orientation === 'white-top'
+            ? 'Flip board — put white at the bottom (V)'
+            : 'Flip board — put white at the top (V)'
+        }
+        aria-label="Flip board orientation"
+        className="fixed bottom-3 right-14 z-50 p-2 rounded-lg border border-border bg-card/80 backdrop-blur text-muted-foreground hover:text-foreground hover:bg-card transition-colors"
+      >
+        <FlipVertical2 className="w-4 h-4" />
+      </button>
+
       {/* Focus-mode toggle. Deliberately small and out of the board's way, but
           always present so there is a way back without the keyboard. */}
       <button
@@ -319,6 +348,7 @@ export default function GamePage() {
             isThinking={engineThinking}
             focusMode={focusMode}
             layoutKey={`${leftOpen}-${rightOpen}`}
+            orientation={orientation}
           />
         </motion.div>
 

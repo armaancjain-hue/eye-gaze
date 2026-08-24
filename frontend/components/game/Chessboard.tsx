@@ -6,6 +6,11 @@ import { GameState, BoardPosition } from '@/lib/chess/types'
 import { BOARD_SIZE, COLUMN_LABELS } from '@/lib/chess/constants'
 import { getLegalMoves } from '@/lib/chess/engine'
 import type { GameStatus } from '@/lib/chess/types'
+import {
+  DEFAULT_ORIENTATION,
+  toLogical,
+  type BoardOrientation,
+} from '@/lib/chess/orientation'
 import { useMaxSquareSize } from '@/lib/game/useMaxSquareSize'
 import Square from './Square'
 
@@ -28,6 +33,8 @@ interface ChessboardProps {
    * viewers may never fire.
    */
   layoutKey?: string
+  /** Which way round to draw the board. Purely presentational. */
+  orientation?: BoardOrientation
 }
 
 /**
@@ -76,6 +83,7 @@ export default function Chessboard({
   isThinking = false,
   focusMode = false,
   layoutKey = '',
+  orientation = DEFAULT_ORIENTATION,
 }: ChessboardProps) {
   const legalMoves = useMemo(() => {
     if (!gameState.selectedSquare) return []
@@ -123,10 +131,21 @@ export default function Chessboard({
           >
             <div
               className="grid"
+              // The gaze pipeline measures this element to turn a screen point
+              // into a square, and needs to know which way round it is drawn.
+              data-chessboard=""
+              data-orientation={orientation}
               style={{ gridTemplateColumns: `repeat(${BOARD_SIZE}, 1fr)` }}
             >
-              {gameState.board.map((row, rowIndex) =>
-                row.map((piece, colIndex) => {
+              {gameState.board.map((_, visualRow) =>
+                gameState.board[visualRow].map((__, visualCol) => {
+                  // Cells are emitted in drawing order; each resolves to the
+                  // logical square it is showing.
+                  const { row: rowIndex, col: colIndex } = toLogical(
+                    { row: visualRow, col: visualCol },
+                    orientation,
+                  )
+                  const piece = gameState.board[rowIndex][colIndex]
                   const isLight = (rowIndex + colIndex) % 2 === 0
                   const isSelected =
                     gameState.selectedSquare?.row === rowIndex &&

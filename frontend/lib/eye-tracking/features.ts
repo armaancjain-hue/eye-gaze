@@ -242,6 +242,28 @@ function extractHeadPose(
   }
 }
 
+/**
+ * The face's extent in the frame, as a fraction of frame height.
+ *
+ * This is the number that decides how much real detail reaches the landmark
+ * model. MediaPipe crops the face and resizes that crop to a fixed 256x256
+ * before the model runs, so a face smaller than 256px in the source is
+ * *upsampled* — the iris is then localised from interpolated pixels, and no
+ * amount of extra capture resolution helps, because the limit is how much of
+ * the sensor the face occupies rather than how many pixels the sensor has.
+ */
+export function faceHeightFraction(landmarks: NormalizedLandmark[]): number {
+  if (!landmarks || landmarks.length === 0) return 0
+  let top = Infinity
+  let bottom = -Infinity
+  for (const p of landmarks) {
+    if (p.y < top) top = p.y
+    if (p.y > bottom) bottom = p.y
+  }
+  const extent = bottom - top
+  return Number.isFinite(extent) ? Math.max(0, Math.min(1, extent)) : 0
+}
+
 /** Mean eye-blink score, 0 (open) .. 1 (closed), from the blendshape head. */
 export function extractBlinkScore(result: FaceLandmarkerResult): number {
   const categories = result.faceBlendshapes?.[0]?.categories

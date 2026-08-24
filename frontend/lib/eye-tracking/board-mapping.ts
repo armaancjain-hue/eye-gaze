@@ -1,5 +1,12 @@
 import { BOARD_SIZE, COLUMN_LABELS } from '@/lib/chess/constants'
 import type { BoardPosition } from '@/lib/chess/types'
+import {
+  DEFAULT_ORIENTATION,
+  isOrientation,
+  toLogical,
+  toVisual,
+  type BoardOrientation,
+} from '@/lib/chess/orientation'
 
 /**
  * Chessboard <-> gaze coordinate mapping.
@@ -21,6 +28,12 @@ export interface BoardGeometry {
   height: number
   /** Edge length of one square in CSS pixels. */
   squareSize: number
+  /**
+   * Which way round the board is drawn. Screen position alone cannot say which
+   * square a point falls on — the top-left cell is a8 in one orientation and h1
+   * in the other — so the mapping has to know.
+   */
+  orientation: BoardOrientation
 }
 
 /** Serialisable rect stored alongside a calibration model. */
@@ -31,29 +44,33 @@ export interface BoardRect {
   height: number
 }
 
-const CORNER_START = '[data-square="0-0"]'
-const CORNER_END = `[data-square="${BOARD_SIZE - 1}-${BOARD_SIZE - 1}"]`
+const BOARD_SELECTOR = '[data-chessboard]'
 
 /**
- * Measure the playing area from its two corner squares. Deriving it from the
- * squares themselves (rather than a wrapper element) means the rect excludes the
- * rank/file label gutters automatically, whatever the surrounding layout does.
+ * Measure the playing area.
+ *
+ * This reads the board element itself rather than locating two corner *squares*.
+ * The earlier version assumed square a8 sat at the top-left, which stops being
+ * true the moment the board can be flipped — it would have measured from
+ * whichever corner a8 had moved to and produced a rect with negative width.
  */
 export function readBoardGeometry(): BoardGeometry | null {
   if (typeof document === 'undefined') return null
-  const first = document.querySelector(CORNER_START)
-  const last = document.querySelector(CORNER_END)
-  if (!first || !last) return null
+  const board = document.querySelector(BOARD_SELECTOR)
+  if (!board) return null
 
-  const a = first.getBoundingClientRect()
-  const b = last.getBoundingClientRect()
-  const left = a.left
-  const top = a.top
-  const width = b.right - a.left
-  const height = b.bottom - a.top
-  if (!(width > 0) || !(height > 0)) return null
+  const rect = board.getBoundingClientRect()
+  if (!(rect.width > 0) || !(rect.height > 0)) return null
 
-  return { left, top, width, height, squareSize: width / BOARD_SIZE }
+  const declared = board.getAttribute('data-orientation')
+  return {
+    left: rect.left,
+    top: rect.top,
+    width: rect.width,
+    height: rect.height,
+    squareSize: rect.width / BOARD_SIZE,
+    orientation: isOrientation(declared) ? declared : DEFAULT_ORIENTATION,
+  }
 }
 
 let cached: BoardGeometry | null = null
@@ -86,11 +103,16 @@ export function toBoardRect(geom: BoardGeometry): BoardRect {
   return { left: geom.left, top: geom.top, width: geom.width, height: geom.height }
 }
 
-/** Centre of a square in viewport pixels. */
-export function squareCenter(geom: BoardGeometry, row: number, col: number): { x: number; y: number } {
+/** Centre of a logical square in viewport pixels, accounting for orientation. */
+export function squareCenter(
+  geom: BoardGeometry,
+  row: number,
+  col: number,
+): { x: number; y: number } {
+  const cell = toVisual({ row, col }, geom.orientation)
   return {
-    x: geom.left + (col + 0.5) * (geom.width / BOARD_SIZE),
-    y: geom.top + (row + 0.5) * (geom.height / BOARD_SIZE),
+    x: geom.left + (cell.col + 0.5) * (geom.width / BOARD_SIZE),
+    y: geom.top + (cell.row + 0.5) * (geom.height / BOARD_SIZE),
   }
 }
 
@@ -104,10 +126,17 @@ export function boardFractionToViewport(
 }
 
 export interface SquareHit {
+  /** The logical square, independent of how the board is drawn. */
   square: BoardPosition
+  /** The cell it is drawn at. Equal to `square` only when white is at the bottom. */
+  cell: BoardPosition
   /** Distance from the square's centre, in units of one square edge. */
   centerDistance: number
-  /** Board-relative coordinates, 0..8 along each axis (may fall outside). */
+  /**
+   * Board-relative coordinates in *drawing* space, 0..8 along each axis (may
+   * fall outside). The stabilizer only ever compares these to each other, so
+   * drawing space is the right frame — it is what the eye actually traverses.
+   */
   fileCoord: number
   rankCoord: number
 }
@@ -138,11 +167,18 @@ export function pointToSquare(
     return null
   }
 
-  const col = Math.min(BOARD_SIZE - 1, Math.max(0, Math.floor(fileCoord)))
-  const row = Math.min(BOARD_SIZE - 1, Math.max(0, Math.floor(rankCoord)))
-  const centerDistance = Math.hypot(fileCoord - (col + 0.5), rankCoord - (row + 0.5))
+  // Which cell was looked at, in drawing order...
+  const cellCol = Math.min(BOARD_SIZE - 1, Math.max(0, Math.floor(fileCoord)))
+  const cellRow = Math.min(BOARD_SIZE - 1, Math.max(0, Math.floor(rankCoord)))
+  const centerDistance = Math.hypot(
+    fileCoord - (cellCol + 0.5),
+    rankCoord - (cellRow + 0.5),
+  )
 
-  return { square: { row, col }, centerDistance, fileCoord, rankCoord }
+  // ...and the square that cell is currently showing.
+  const square = toLogical({ row: cellRow, col: cellCol }, geom.orientation)
+
+  return { square, cell: { row: cellRow, col: cellCol }, centerDistance, fileCoord, rankCoord }
 }
 
 /** `{row: 0, col: 0}` is a8 — row 0 is the top rank as rendered. */

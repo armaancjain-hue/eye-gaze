@@ -6,6 +6,7 @@ import {
 import {
   extractBlinkScore,
   extractGazeFeature,
+  faceHeightFraction,
   FeatureSmoother,
   type GazeFeature,
 } from './features'
@@ -74,6 +75,13 @@ export interface FrameResult {
   novelty: number
   /** Board size now vs. at calibration time; 1 means unchanged, null if unknown. */
   boardScale: number | null
+  /**
+   * How tall the face is in the captured frame, in source pixels. The landmark
+   * model resizes its face crop to 256x256, so below ~256 here the iris is being
+   * located from upsampled pixels and precision is lost before any of the rest
+   * of this pipeline runs.
+   */
+  faceSizePx: number
 }
 
 /**
@@ -256,10 +264,12 @@ export class GazeTracker {
         calibrated: this.hasCalibration,
         novelty: 0,
         boardScale: this.lastBoardScale,
+        faceSizePx: 0,
       }
     }
 
     const feature = this.smoother.push(raw)
+    const faceSizePx = faceHeightFraction(landmarks!) * video.videoHeight
 
     const width = window.innerWidth
     const height = window.innerHeight
@@ -319,6 +329,7 @@ export class GazeTracker {
       calibrated: this.hasCalibration,
       novelty,
       boardScale: this.lastBoardScale,
+      faceSizePx,
     }
   }
 

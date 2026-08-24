@@ -595,7 +595,14 @@ function ReferenceBoard({ dimmed }: { dimmed: boolean }) {
         }`}
         style={{ width: size || undefined, visibility: size ? 'visible' : 'hidden' }}
       >
-        <div className="grid" style={{ gridTemplateColumns: `repeat(${BOARD_SIZE}, 1fr)` }}>
+        {/* Same marker the real board carries, so the geometry helpers measure
+            this identically. Orientation is irrelevant here — calibration only
+            uses the board's rectangle, never the identity of a square. */}
+        <div
+          className="grid"
+          data-chessboard=""
+          style={{ gridTemplateColumns: `repeat(${BOARD_SIZE}, 1fr)` }}
+        >
           {Array.from({ length: BOARD_SIZE * BOARD_SIZE }, (_, i) => {
             const row = Math.floor(i / BOARD_SIZE)
             const col = i % BOARD_SIZE

@@ -28,6 +28,26 @@ const DRIFT_THRESHOLD = 0.5
  */
 const BOARD_RESIZE_TOLERANCE = 0.15
 
+/**
+ * Face framing, as a fraction of frame height.
+ *
+ * MediaPipe resizes its face crop to a fixed 256x256 before the landmark model
+ * runs, so once the face reaches 256 source pixels, extra capture resolution is
+ * simply thrown away — and below it, the iris is localised from upsampled
+ * pixels. Framing therefore matters more than megapixels, and it is the one
+ * thing the user can actually change.
+ */
+const MODEL_INPUT_PX = 256
+/** Aim here: comfortably over the model input, with room to move. */
+const TARGET_FACE_FRACTION = 0.45
+/** Past this the head clips out of frame as soon as it moves. */
+const MAX_FACE_FRACTION = 0.6
+/** Only bother adjusting when framing is clearly loose. */
+const ZOOM_TRIGGER_FRACTION = 0.36
+/** Cap the number of automatic adjustments so it can never hunt. */
+const MAX_ZOOM_ADJUSTMENTS = 3
+const ZOOM_SETTLE_MS = 1500
+
 export interface UseGazeTracking {
   /** Attach to the <video> element that shows the webcam feed. */
   videoRef: React.RefObject<HTMLVideoElement | null>
@@ -98,6 +118,12 @@ export function useGazeTracking(): UseGazeTracking {
   } | null>(null)
   const [fps, setFps] = useState(0)
   const frameTimesRef = useRef<number[]>([])
+  const [faceSizePx, setFaceSizePx] = useState(0)
+  const [framingWarning, setFramingWarning] = useState(false)
+  const [zoomSupported, setZoomSupported] = useState(false)
+  const videoTrackRef = useRef<MediaStreamTrack | null>(null)
+  const zoomAdjustmentsRef = useRef(0)
+  const lastZoomAtRef = useRef(0)
   const [state, setState] = useState<EyeTrackingState>({
     status: 'inactive',
     gazePoint: { x: 0, y: 0, confidence: 0 },
@@ -117,6 +143,53 @@ export function useGazeTracking(): UseGazeTracking {
     setHasCalibration(tracker.hasCalibration)
     setCalibrationQuality(tracker.calibrationQuality)
     setCalibrationScore(tracker.calibrationScore)
+  }, [])
+
+  /**
+   * Nudge the camera's zoom so the face fills more of the sensor.
+   *
+   * This is the only layer where "zoom in on what matters" can actually work.
+   * Cropping the image before detection cannot: the landmark model is fed a
+   * whole face and returns a 478-point mesh, so an eye-only crop has no face to
+   * detect. Zooming the *sensor* is different — it puts genuinely more
+   * photosites on the face, so the 256x256 crop is filled with real detail
+   * rather than interpolation.
+   *
+   * Deliberately conservative: it only ever tightens framing that is clearly
+   * loose, stops well short of the head clipping out of frame when the user
+   * moves, and gives up after a few attempts so it can never oscillate.
+   */
+  const autoFrame = useCallback(async (faceFraction: number) => {
+    const track = videoTrackRef.current
+    if (!track || faceFraction <= 0.05) return
+    if (zoomAdjustmentsRef.current >= MAX_ZOOM_ADJUSTMENTS) return
+    if (performance.now() - lastZoomAtRef.current < ZOOM_SETTLE_MS) return
+    if (faceFraction >= ZOOM_TRIGGER_FRACTION) return
+
+    // `zoom` is an optional capability; most webcams do not expose it.
+    const caps = track.getCapabilities?.() as { zoom?: { min: number; max: number; step?: number } }
+    const range = caps?.zoom
+    if (!range || typeof range.min !== 'number' || range.max <= range.min) return
+
+    const settings = track.getSettings?.() as { zoom?: number }
+    const current = typeof settings?.zoom === 'number' ? settings.zoom : range.min
+
+    // Zoom multiplies how much of the frame the face covers, so the factor
+    // needed is simply the ratio of target to current coverage — capped so the
+    // face never exceeds the fraction that still leaves room for head movement.
+    const wanted = current * (TARGET_FACE_FRACTION / faceFraction)
+    const ceiling = current * (MAX_FACE_FRACTION / faceFraction)
+    const next = Math.max(range.min, Math.min(range.max, Math.min(wanted, ceiling)))
+    if (next <= current * 1.05) return
+
+    lastZoomAtRef.current = performance.now()
+    zoomAdjustmentsRef.current += 1
+    try {
+      await track.applyConstraints({ advanced: [{ zoom: next }] } as MediaTrackConstraints)
+    } catch {
+      // Some drivers advertise zoom and then refuse it; stop trying.
+      zoomAdjustmentsRef.current = MAX_ZOOM_ADJUSTMENTS
+    }
   }, [])
 
   const loop = useCallback(() => {
@@ -162,6 +235,18 @@ export function useGazeTracking(): UseGazeTracking {
         setDriftWarning((prev) => (prev ? false : prev))
       }
 
+      // Framing quality, smoothed — a single frame's landmark jitter should not
+      // flip the warning on and off.
+      if (frame.facePresent && frame.faceSizePx > 0) {
+        setFaceSizePx((prev) => (prev === 0 ? frame.faceSizePx : prev + 0.1 * (frame.faceSizePx - prev)))
+        const video = videoRef.current
+        if (video?.videoHeight) {
+          const fraction = frame.faceSizePx / video.videoHeight
+          setFramingWarning(frame.faceSizePx < MODEL_INPUT_PX)
+          void autoFrame(fraction)
+        }
+      }
+
       const scale = frame.boardScale
       const resized = scale !== null && Math.abs(scale - 1) > BOARD_RESIZE_TOLERANCE
       setBoardResized((prev) => (prev === resized ? prev : resized))
@@ -184,7 +269,7 @@ export function useGazeTracking(): UseGazeTracking {
     }
 
     rafRef.current = requestAnimationFrame(loop)
-  }, [])
+  }, [autoFrame])
 
   const start = useCallback(async () => {
     if (startedRef.current) return
@@ -237,10 +322,14 @@ export function useGazeTracking(): UseGazeTracking {
       // request, not a guarantee, and a webcam quietly capped at 480p is worth
       // knowing about — it puts a floor under the achievable accuracy that no
       // amount of calibration can lift.
-      const settings = stream.getVideoTracks()[0]?.getSettings()
+      const track = stream.getVideoTracks()[0]
+      videoTrackRef.current = track ?? null
+      const settings = track?.getSettings()
       if (settings?.width && settings?.height) {
         setCameraResolution({ width: settings.width, height: settings.height })
       }
+      const caps = track?.getCapabilities?.() as { zoom?: { min: number; max: number } } | undefined
+      setZoomSupported(!!caps?.zoom && caps.zoom.max > caps.zoom.min)
 
       const video = videoRef.current
       if (video) {
@@ -319,6 +408,9 @@ export function useGazeTracking(): UseGazeTracking {
     boardResized,
     cameraResolution,
     fps,
+    faceSizePx,
+    framingWarning,
+    zoomSupported,
     start,
     makeSample,
     calibrate,

@@ -77,6 +77,14 @@ interface VoteEntry {
   file: number
   rank: number
   square: BoardPosition | null
+  /**
+   * Where that square was drawn. The smoothed gaze coordinates live in drawing
+   * space, so the sub-square offset has to be measured against the drawn cell —
+   * comparing it to the logical square works only while the board happens to be
+   * white-at-the-bottom, and silently collapses the confidence score when the
+   * board is flipped.
+   */
+  cell: BoardPosition | null
   weight: number
 }
 
@@ -148,6 +156,7 @@ export class SquareStabilizer {
         file: hit?.fileCoord ?? Number.NaN,
         rank: hit?.rankCoord ?? Number.NaN,
         square: hit?.square ?? null,
+        cell: hit?.cell ?? null,
         weight,
       })
     }
@@ -168,7 +177,10 @@ export class SquareStabilizer {
     const smoothedRank = onBoardVotes.length ? median(onBoardVotes.map((v) => v.rank)) : Number.NaN
 
     // --- Stage 2: confidence-weighted majority vote --------------------------
-    const tally = new Map<string, { square: BoardPosition; weight: number }>()
+    const tally = new Map<
+      string,
+      { square: BoardPosition; cell: BoardPosition | null; weight: number }
+    >()
     let totalWeight = 0
     let offBoardWeight = 0
     for (const v of this.votes) {
@@ -180,15 +192,17 @@ export class SquareStabilizer {
       const key = `${v.square.row}-${v.square.col}`
       const entry = tally.get(key)
       if (entry) entry.weight += v.weight
-      else tally.set(key, { square: v.square, weight: v.weight })
+      else tally.set(key, { square: v.square, cell: v.cell, weight: v.weight })
     }
 
     let winner: BoardPosition | null = null
+    let winnerCell: BoardPosition | null = null
     let winnerWeight = 0
     tally.forEach((entry) => {
       if (entry.weight > winnerWeight) {
         winnerWeight = entry.weight
         winner = entry.square
+        winnerCell = entry.cell
       }
     })
 
@@ -198,7 +212,7 @@ export class SquareStabilizer {
 
     // --- Confidence ----------------------------------------------------------
     const confidence = stable
-      ? this.scoreConfidence(winner!, voteFraction, smoothedFile, smoothedRank, totalWeight)
+      ? this.scoreConfidence(winnerCell, voteFraction, smoothedFile, smoothedRank, totalWeight)
       : 0
 
     // --- Stage 3: dwell ------------------------------------------------------
@@ -266,7 +280,8 @@ export class SquareStabilizer {
    * for each other.
    */
   private scoreConfidence(
-    winner: BoardPosition,
+    /** The winning square's *drawn* cell — same space as the smoothed gaze. */
+    winnerCell: BoardPosition | null,
     voteFraction: number,
     smoothedFile: number,
     smoothedRank: number,
@@ -274,12 +289,12 @@ export class SquareStabilizer {
   ): number {
     const vote = clamp01(voteFraction)
 
-    // Distance from the square's centre, in squares. 0 at the centre, ~0.71 at
+    // Distance from the cell's centre, in squares. 0 at the centre, ~0.71 at
     // a corner — near a boundary the neighbour is a live possibility.
     let spatial = 0.5
-    if (Number.isFinite(smoothedFile) && Number.isFinite(smoothedRank)) {
-      const dx = smoothedFile - (winner.col + 0.5)
-      const dy = smoothedRank - (winner.row + 0.5)
+    if (winnerCell && Number.isFinite(smoothedFile) && Number.isFinite(smoothedRank)) {
+      const dx = smoothedFile - (winnerCell.col + 0.5)
+      const dy = smoothedRank - (winnerCell.row + 0.5)
       spatial = clamp01(1 - Math.hypot(dx, dy) / 0.75)
     }
 

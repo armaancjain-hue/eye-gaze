@@ -4,6 +4,7 @@ import Link from 'next/link'
 import { motion } from 'framer-motion'
 import { Eye, Zap, Brain, Globe, Accessibility, Sparkles } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import TopNav from '@/components/layout/TopNav'
 
 const FEATURES = [
   {
@@ -61,8 +62,12 @@ const item = {
 export default function Home() {
   return (
     <main className="min-h-screen bg-background">
+      {/* The nav carries the account controls. Without it this page had no route
+          to sign in or sign up at all. */}
+      <TopNav />
+
       {/* Hero Section */}
-      <section className="relative px-4 py-20 sm:px-6 lg:px-8 flex flex-col items-center justify-center min-h-screen">
+      <section className="relative px-4 py-20 sm:px-6 lg:px-8 flex flex-col items-center justify-center min-h-[calc(100vh-4rem)]">
         <motion.div
           initial={{ opacity: 0, y: -20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -105,6 +110,22 @@ export default function Home() {
               </Button>
             </Link>
           </motion.div>
+
+          <motion.p
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ delay: 0.5, duration: 0.5 }}
+            className="text-sm text-muted-foreground"
+          >
+            <Link href="/signup" className="text-primary font-medium hover:underline">
+              Create an account
+            </Link>{' '}
+            to keep your games and calibration, or{' '}
+            <Link href="/signin" className="text-primary font-medium hover:underline">
+              sign in
+            </Link>
+            . You can also just start playing.
+          </motion.p>
         </motion.div>
       </section>
 
