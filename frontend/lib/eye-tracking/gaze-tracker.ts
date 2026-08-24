@@ -37,11 +37,12 @@ const LEFT_EYE_INNER = 362
 const LEFT_EYE_OUTER = 263
 const LEFT_IRIS_CENTER = 473
 
-// How fast the adaptive source smoothing opens up as the eyes move. At a
-// fixation `speed` ≈ 0 so alpha sits at its heavy floor (jitter crushed); during
-// a saccade `speed` is large so alpha rises and the estimate keeps up instead of
-// lagging. Tuned against the ~±0.2 range of the normalised iris offset.
-const FEATURE_SPEED_GAIN = 4
+// Radial deadband on the final cursor, as a fraction of the screen diagonal. The
+// cursor holds its position while the gaze estimate stays within this radius, so
+// fixation micro-jitter and landmark noise don't twitch it; once the gaze truly
+// shifts past the radius it moves (almost) fully, so there's no lag on real
+// look-shifts. Small enough (~0.6% ≈ 13px on 1080p) not to hurt square targeting.
+const OUTPUT_DEADBAND_FRACTION = 0.006
 
 // A frame only feeds calibration if the eyes are open past this blink score. Iris
 // landmarks are unreliable while the lids are closing, so sampling through a
@@ -81,10 +82,16 @@ class OneEuroFilter {
   private prevT: number | null = null
 
   constructor(
-    private readonly minCutoff: number,
-    private readonly beta: number,
+    private minCutoff: number,
+    private beta: number,
     private readonly dCutoff = 1,
   ) {}
+
+  /** Retune the filter live (e.g. from a user smoothing control). */
+  configure(minCutoff: number, beta: number): void {
+    this.minCutoff = minCutoff
+    this.beta = beta
+  }
 
   private alpha(cutoff: number, dt: number): number {
     const tau = 1 / (2 * Math.PI * cutoff)
@@ -158,9 +165,15 @@ export class GazeTracker {
   private lastFeature: RawGazeFeature | null = null
 
   // Adaptive output smoothing, one filter per axis. minCutoff sets the floor of
-  // stillness-smoothing; beta sets how quickly it opens up as the gaze moves.
-  private readonly filterX = new OneEuroFilter(0.5, 0.012)
-  private readonly filterY = new OneEuroFilter(0.5, 0.012)
+  // stillness-smoothing (lower = calmer at rest); beta sets how quickly it opens
+  // up as the gaze moves (lower = calmer, slightly more lag on fast moves). Tuned
+  // toward calm because the on-screen cursor makes any residual jitter visible;
+  // both are retunable at runtime via setSmoothing().
+  private readonly filterX = new OneEuroFilter(0.35, 0.006)
+  private readonly filterY = new OneEuroFilter(0.35, 0.006)
+  // Radial deadband as a fraction of the screen diagonal; retunable at runtime.
+  private deadbandFraction = OUTPUT_DEADBAND_FRACTION
+  // Displayed cursor position after the deadband step below.
   private lastX = 0
   private lastY = 0
 
@@ -170,7 +183,8 @@ export class GazeTracker {
   // Lower alpha = heavier smoothing (more lag); this is the main knob to tune.
   private smGx: number | null = null
   private smGy: number | null = null
-  private readonly featureAlpha = 0.08
+  // Source-smoothing strength (lower = heavier smoothing); retunable at runtime.
+  private featureAlpha = 0.08
 
   // Whether the most recent processed frame is trustworthy enough to calibrate
   // against (face present, eyes open). Gates makeSample so blinks/face-loss during
@@ -183,6 +197,24 @@ export class GazeTracker {
 
   get calibrationQuality(): number | null {
     return this.calibration ? this.calibration.rmsError : null
+  }
+
+  /**
+   * Set overall cursor smoothing from a single 0..1 strength (0 = responsive,
+   * 1 = very smooth/steady). One knob drives all three stages together — source
+   * EMA, output One-Euro, and the deadband — so "more smoothing" always means
+   * calmer, at the cost of a little lag. Lets the user tune jitter to their own
+   * camera/lighting without touching code.
+   */
+  setSmoothing(strength: number): void {
+    const s = Math.max(0, Math.min(1, strength))
+    const lerp = (a: number, b: number) => a + (b - a) * s
+    this.featureAlpha = lerp(0.16, 0.045) // higher = follows raw faster
+    const minCutoff = lerp(0.9, 0.15) // lower = calmer at rest
+    const beta = lerp(0.02, 0.004) // lower = calmer while moving
+    this.filterX.configure(minCutoff, beta)
+    this.filterY.configure(minCutoff, beta)
+    this.deadbandFraction = lerp(0.0015, 0.012)
   }
 
   /** Load WASM + model. Safe to call once; subsequent calls are no-ops. */
@@ -240,8 +272,22 @@ export class GazeTracker {
     // Clamp to viewport, then smooth with the adaptive filter.
     const clampedX = Math.max(0, Math.min(width, raw.x))
     const clampedY = Math.max(0, Math.min(height, raw.y))
-    this.lastX = this.filterX.filter(clampedX, timestampMs)
-    this.lastY = this.filterY.filter(clampedY, timestampMs)
+    const fx = this.filterX.filter(clampedX, timestampMs)
+    const fy = this.filterY.filter(clampedY, timestampMs)
+
+    // Radial deadband: hold the displayed cursor still until the smoothed gaze
+    // moves past a small radius, then move by the overshoot. This is what makes
+    // the cursor sit calm during a fixation instead of shimmering in place, with
+    // no added lag once the gaze genuinely travels.
+    const deadband = this.deadbandFraction * Math.hypot(width, height)
+    const dx = fx - this.lastX
+    const dy = fy - this.lastY
+    const dist = Math.hypot(dx, dy)
+    if (dist > deadband) {
+      const k = (dist - deadband) / dist
+      this.lastX += dx * k
+      this.lastY += dy * k
+    }
 
     const blinkScore = this.extractBlink(result)
     const eyesClosed = blinkScore > 0.5
@@ -287,22 +333,13 @@ export class GazeTracker {
     // image's left. Then smooth at the source to kill the residual jitter.
     const rawGx = -((right.gx + left.gx) / 2)
     const rawGy = (right.gy + left.gy) / 2
-    if (this.smGx === null || this.smGy === null) {
-      this.smGx = rawGx
-      this.smGy = rawGy
-    } else {
-      // Adaptive smoothing. At a fixation the eyes are nearly still, so `speed`
-      // ≈ 0, alpha stays at the heavy floor, and iris jitter is crushed — which
-      // is what lets a dwell settle on one square. During a saccade the raw
-      // signal jumps, alpha opens up, and the estimate catches the new target
-      // instead of lagging ~200ms behind. At rest this is identical to the old
-      // fixed-alpha smoothing, so it can only help responsiveness, never hurt
-      // dwell stability.
-      const speed = Math.hypot(rawGx - this.smGx, rawGy - this.smGy)
-      const alpha = Math.min(0.5, this.featureAlpha + speed * FEATURE_SPEED_GAIN)
-      this.smGx += alpha * (rawGx - this.smGx)
-      this.smGy += alpha * (rawGy - this.smGy)
-    }
+    // Steady heavy smoothing of the raw iris offset. A fixed low alpha crushes
+    // the per-frame landmark jitter before it reaches the calibration model's
+    // squared/interaction terms (which would otherwise amplify it). Deliberately
+    // NOT adaptive: opening the filter up on movement also lets noise through,
+    // which read as the cursor being twitchy.
+    this.smGx = this.smGx === null ? rawGx : this.smGx + this.featureAlpha * (rawGx - this.smGx)
+    this.smGy = this.smGy === null ? rawGy : this.smGy + this.featureAlpha * (rawGy - this.smGy)
 
     // Head forward vector from the facial transformation matrix (column-major).
     // Column 2 is the local +Z axis in world space -> where the face points.

@@ -55,6 +55,12 @@ export default function GamePage() {
     return () => clearInterval(interval)
   }, [])
 
+  // Push the smoothing setting into the tracker whenever it changes (and once the
+  // tracker is live). Higher setting = steadier, less jittery cursor.
+  useEffect(() => {
+    if (gaze.isReady) gaze.setSmoothing(accessibility.smoothing / 100)
+  }, [gaze.isReady, accessibility.smoothing, gaze.setSmoothing])
+
   // When it becomes Black's turn, ask the backend Stockfish for its move.
   // Keyed on move count so each position is requested exactly once (also guards
   // against React's dev double-invoke).

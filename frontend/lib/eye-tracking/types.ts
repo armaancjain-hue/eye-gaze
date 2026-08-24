@@ -16,6 +16,8 @@ export interface EyeTrackingState {
 
 export interface AccessibilitySettings {
   dwellTime: number // milliseconds
+  /** Cursor smoothing/stability, 0 (responsive) .. 100 (very steady). */
+  smoothing: number
   blinkSensitivity: 'low' | 'medium' | 'high'
   highContrast: boolean
   largeCursor: boolean

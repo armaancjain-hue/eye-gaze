@@ -31,6 +31,8 @@ export interface UseGazeTracking {
   resetCalibration: () => void
   /** Subscribe to deliberate-blink events. Returns an unsubscribe fn. */
   onBlink: (cb: () => void) => () => void
+  /** Set cursor smoothing strength, 0 (responsive) .. 1 (very steady). */
+  setSmoothing: (strength: number) => void
 }
 
 export function useGazeTracking(): UseGazeTracking {
@@ -197,6 +199,10 @@ export function useGazeTracking(): UseGazeTracking {
     setHasCalibration(false)
   }, [])
 
+  const setSmoothing = useCallback((strength: number) => {
+    trackerRef.current?.setSmoothing(strength)
+  }, [])
+
   // Tear down camera + loop on unmount.
   useEffect(() => {
     return () => {
@@ -220,5 +226,6 @@ export function useGazeTracking(): UseGazeTracking {
     calibrate,
     resetCalibration,
     onBlink,
+    setSmoothing,
   }
 }

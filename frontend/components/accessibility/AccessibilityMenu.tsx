@@ -27,6 +27,13 @@ export default function AccessibilityMenu({
     })
   }
 
+  const handleSmoothingChange = (value: string) => {
+    onSettingsChange({
+      ...settings,
+      smoothing: parseInt(value),
+    })
+  }
+
   const handleBlinkSensitivityChange = (value: string) => {
     onSettingsChange({
       ...settings,
@@ -103,6 +110,29 @@ export default function AccessibilityMenu({
                   <span>200ms</span>
                   <span className="font-mono">{settings.dwellTime}ms</span>
                   <span>1000ms</span>
+                </div>
+              </div>
+
+              {/* Cursor Smoothing — raise this if the gaze cursor feels jittery
+                  or too sensitive; lower it for snappier tracking. */}
+              <div className="space-y-3">
+                <label className="flex items-center gap-2 text-sm font-semibold text-foreground">
+                  <Eye className="w-4 h-4" />
+                  Cursor Smoothing
+                </label>
+                <input
+                  type="range"
+                  min="0"
+                  max="100"
+                  step="5"
+                  value={settings.smoothing}
+                  onChange={(e) => handleSmoothingChange(e.target.value)}
+                  className="w-full"
+                />
+                <div className="flex justify-between text-xs text-muted-foreground">
+                  <span>Responsive</span>
+                  <span className="font-mono">{settings.smoothing}</span>
+                  <span>Steady</span>
                 </div>
               </div>
 
