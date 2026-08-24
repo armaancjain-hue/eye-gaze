@@ -5,6 +5,7 @@ import { motion } from 'framer-motion'
 import { GameState, BoardPosition } from '@/lib/chess/types'
 import { BOARD_SIZE, COLUMN_LABELS } from '@/lib/chess/constants'
 import { getLegalMoves } from '@/lib/chess/engine'
+import type { GameStatus } from '@/lib/chess/types'
 import { useMaxSquareSize } from '@/lib/game/useMaxSquareSize'
 import Square from './Square'
 
@@ -42,6 +43,30 @@ interface ChessboardProps {
  */
 const MAX_BOARD_PX = 1400
 
+/** Statuses that end the game, and how each reads to a player. */
+const STATUS_TEXT: Partial<Record<GameStatus, string>> = {
+  white_check: 'White is in check',
+  black_check: 'Black is in check',
+  checkmate: 'Checkmate',
+  stalemate: 'Stalemate — draw',
+  draw_repetition: 'Draw — threefold repetition',
+  draw_fifty_move: 'Draw — fifty-move rule',
+  draw_insufficient: 'Draw — insufficient material',
+}
+
+const STATUS_CLASS: Partial<Record<GameStatus, string>> = {
+  white_check: 'text-accent font-semibold',
+  black_check: 'text-accent font-semibold',
+  checkmate: 'text-accent font-semibold',
+  stalemate: 'text-muted-foreground font-semibold',
+  draw_repetition: 'text-muted-foreground font-semibold',
+  draw_fifty_move: 'text-muted-foreground font-semibold',
+  draw_insufficient: 'text-muted-foreground font-semibold',
+}
+
+/** Positions where the side to move is under check, so the king is highlighted. */
+const IN_CHECK = new Set<GameStatus>(['white_check', 'black_check', 'checkmate'])
+
 export default function Chessboard({
   gameState,
   onSquareClick,
@@ -55,11 +80,11 @@ export default function Chessboard({
   const legalMoves = useMemo(() => {
     if (!gameState.selectedSquare) return []
     return getLegalMoves(
-      gameState.board,
+      gameState,
       gameState.selectedSquare.row,
       gameState.selectedSquare.col,
     )
-  }, [gameState.selectedSquare, gameState.board])
+  }, [gameState])
 
   // The board is sized to the space that actually exists, measured, rather than
   // to an assumption about how much chrome surrounds it.
@@ -153,10 +178,10 @@ export default function Chessboard({
       {/* Status sits outside the measured area, so its height is subtracted from
           the board's budget automatically instead of being guessed at. */}
       <div className="h-6 shrink-0 flex items-center justify-center gap-2 text-sm">
-        {gameState.status === 'checkmate' ? (
-          <span className="text-accent font-semibold">Checkmate</span>
-        ) : gameState.status === 'stalemate' ? (
-          <span className="text-muted-foreground font-semibold">Stalemate — draw</span>
+        {STATUS_TEXT[gameState.status] ? (
+          <span className={STATUS_CLASS[gameState.status] ?? 'text-muted-foreground'}>
+            {STATUS_TEXT[gameState.status]}
+          </span>
         ) : isThinking ? (
           <span className="text-primary font-semibold animate-pulse">
             Stockfish is thinking…
@@ -165,9 +190,6 @@ export default function Chessboard({
           <span className="text-muted-foreground">
             {gameState.whiteToMove ? 'White' : 'Black'} to move
           </span>
-        )}
-        {gameState.status.includes('check') && (
-          <span className="text-accent font-semibold">Check!</span>
         )}
       </div>
     </div>

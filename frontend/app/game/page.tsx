@@ -13,7 +13,7 @@ import TopNav from '@/components/layout/TopNav'
 import AccessibilityMenu from '@/components/accessibility/AccessibilityMenu'
 import { createInitialGameState } from '@/lib/chess/mock-data'
 import { DEFAULT_ACCESSIBILITY_SETTINGS } from '@/lib/eye-tracking/mock-data'
-import { GameState, BoardPosition } from '@/lib/chess/types'
+import { GameState, BoardPosition, isGameOver } from '@/lib/chess/types'
 import { AccessibilitySettings } from '@/lib/eye-tracking/types'
 import { makeMove, getPieceAt } from '@/lib/chess/engine'
 import { getBestMove } from '@/lib/chess/stockfish-api'
@@ -44,7 +44,8 @@ export default function GamePage() {
   const [focusMode, setFocusMode] = useState(false)
 
   // Human plays White; the backend Stockfish plays Black.
-  const isHumanTurn = gameState.whiteToMove && !engineThinking
+  const isHumanTurn =
+    gameState.whiteToMove && !engineThinking && !isGameOver(gameState.status)
 
   // Real eye tracking (webcam + MediaPipe face mesh).
   const gaze = useGazeTracking()
@@ -93,7 +94,7 @@ export default function GamePage() {
   const requestedForMoveCount = useRef(-1)
   useEffect(() => {
     if (gameState.whiteToMove) return
-    if (gameState.status === 'checkmate' || gameState.status === 'stalemate') return
+    if (isGameOver(gameState.status)) return
     if (requestedForMoveCount.current === gameState.moves.length) return
     requestedForMoveCount.current = gameState.moves.length
 
@@ -109,13 +110,13 @@ export default function GamePage() {
           return
         }
         setGameState((prev) => {
-          if (!result.move) {
-            // No move available: game is over.
-            return { ...prev, status: result.status ?? 'checkmate' }
-          }
-          const next = applyUciMove(prev, result.move)
-          if (!next) return prev
-          return result.status ? { ...next, status: result.status } : next
+          // The engine reporting no move means the position is terminal — and
+          // our own rules already know exactly which kind of terminal it is, so
+          // there is nothing to overwrite. The backend's status was previously
+          // trusted over the local one only because the local rules could not
+          // detect mate or stalemate at all.
+          if (!result.move) return prev
+          return applyUciMove(prev, result.move) ?? prev
         })
         setEngineThinking(false)
       })
@@ -350,6 +351,8 @@ export default function GamePage() {
                 targetConfidence={dwellConfidence}
                 driftWarning={gaze.driftWarning}
                 boardResized={gaze.boardResized}
+                cameraResolution={gaze.cameraResolution}
+                fps={gaze.fps}
               />
             </div>
             <div className="flex-1 min-h-0 overflow-hidden">
@@ -394,6 +397,8 @@ export default function GamePage() {
             targetConfidence={dwellConfidence}
             driftWarning={gaze.driftWarning}
             boardResized={gaze.boardResized}
+            cameraResolution={gaze.cameraResolution}
+            fps={gaze.fps}
           />
           <MoveHistoryPanel moves={gameState.moves} />
         </div>

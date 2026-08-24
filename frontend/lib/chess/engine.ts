@@ -1,300 +1,226 @@
-import { GameState, BoardPosition, Move, Piece, PieceType, SquareContent } from './types'
+import { Chess, type Square as AlgebraicSquare } from 'chess.js'
+import {
+  type BoardPosition,
+  type GameState,
+  type GameStatus,
+  type Move,
+  type Piece,
+  type PieceType,
+  type SquareContent,
+} from './types'
+
+/**
+ * Chess rules, delegated to chess.js.
+ *
+ * This used to be a hand-written move generator, and it was wrong in the ways
+ * hand-written move generators usually are: no castling, no en passant, and —
+ * worst of the three — no check filtering, so a piece could be moved out of a
+ * pin and leave its own king captured. It also never detected checkmate,
+ * stalemate, repetition or the fifty-move rule locally, and inferred castling
+ * rights by looking at where pieces were standing, which cannot distinguish
+ * "never moved" from "moved away and came back".
+ *
+ * chess.js is the library lichess-adjacent projects use for exactly this, and
+ * the app's own representation is kept unchanged around it: `GameState.fen` is
+ * the source of truth, and the board grid the UI renders is derived from it.
+ */
+
+const FILES = 'abcdefgh'
+
+/** Grid position to algebraic square, e.g. {row:6,col:4} -> "e2". */
+export function toAlgebraic(pos: BoardPosition): AlgebraicSquare {
+  return `${FILES[pos.col]}${8 - pos.row}` as AlgebraicSquare
+}
+
+/** Algebraic square to grid position, e.g. "e2" -> {row:6,col:4}. */
+export function toPosition(square: string): BoardPosition {
+  return { row: 8 - Number(square[1]), col: FILES.indexOf(square[0]) }
+}
+
+/**
+ * chess.js reports rank 8 first and lowercases black, which is precisely the
+ * grid convention the UI already uses — so this is a straight relabelling.
+ */
+function boardFrom(chess: Chess): SquareContent[][] {
+  return chess.board().map((rank) =>
+    rank.map<SquareContent>((cell) =>
+      cell
+        ? {
+            type: cell.type.toUpperCase() as PieceType,
+            color: cell.color === 'w' ? 'white' : 'black',
+          }
+        : null,
+    ),
+  )
+}
+
+/**
+ * Terminal conditions are checked before `isDraw()`, which is true for all of
+ * them — asking it first would report every stalemate and repetition as a
+ * generic fifty-move draw.
+ */
+function statusFrom(chess: Chess): GameStatus {
+  if (chess.isCheckmate()) return 'checkmate'
+  if (chess.isStalemate()) return 'stalemate'
+  if (chess.isInsufficientMaterial()) return 'draw_insufficient'
+  if (chess.isThreefoldRepetition()) return 'draw_repetition'
+  if (chess.isDraw()) return 'draw_fifty_move'
+  if (chess.isCheck()) return chess.turn() === 'w' ? 'white_check' : 'black_check'
+  return 'playing'
+}
+
+/** Load a position, returning null rather than throwing on a malformed FEN. */
+function load(fen: string): Chess | null {
+  try {
+    return new Chess(fen)
+  } catch {
+    return null
+  }
+}
+
+export function createGame(): GameState {
+  const chess = new Chess()
+  return {
+    fen: chess.fen(),
+    board: boardFrom(chess),
+    whiteToMove: true,
+    moves: [],
+    status: 'playing',
+    selectedSquare: null,
+    lastMove: null,
+    capturedPieces: { white: [], black: [] },
+  }
+}
 
 export function isValidPosition(row: number, col: number): boolean {
   return row >= 0 && row <= 7 && col >= 0 && col <= 7
 }
 
-export function getPieceAt(board: SquareContent[][], row: number, col: number): Piece | null {
-  if (!isValidPosition(row, col)) return null
-  return board[row][col]
-}
-
-export function isSameColor(piece1: Piece | null, piece2: Piece | null): boolean {
-  if (!piece1 || !piece2) return false
-  return piece1.color === piece2.color
-}
-
-function getPawnMoves(board: SquareContent[][], row: number, col: number, piece: Piece): BoardPosition[] {
-  const moves: BoardPosition[] = []
-  const direction = piece.color === 'white' ? -1 : 1
-  const startRow = piece.color === 'white' ? 6 : 1
-
-  // One square forward
-  const nextRow = row + direction
-  if (isValidPosition(nextRow, col) && !getPieceAt(board, nextRow, col)) {
-    moves.push({ row: nextRow, col })
-
-    // Two squares forward on first move
-    if (row === startRow) {
-      const twoSquaresRow = row + 2 * direction
-      if (!getPieceAt(board, twoSquaresRow, col)) {
-        moves.push({ row: twoSquaresRow, col })
-      }
-    }
-  }
-
-  // Captures diagonally
-  const capturePositions = [
-    { row: nextRow, col: col - 1 },
-    { row: nextRow, col: col + 1 },
-  ]
-
-  capturePositions.forEach(({ row: captureRow, col: captureCol }) => {
-    if (isValidPosition(captureRow, captureCol)) {
-      const targetPiece = getPieceAt(board, captureRow, captureCol)
-      if (targetPiece && targetPiece.color !== piece.color) {
-        moves.push({ row: captureRow, col: captureCol })
-      }
-    }
-  })
-
-  return moves
-}
-
-function getRookMoves(board: SquareContent[][], row: number, col: number, piece: Piece): BoardPosition[] {
-  const moves: BoardPosition[] = []
-  const directions = [
-    { dRow: -1, dCol: 0 }, // up
-    { dRow: 1, dCol: 0 },  // down
-    { dRow: 0, dCol: -1 }, // left
-    { dRow: 0, dCol: 1 },  // right
-  ]
-
-  directions.forEach(({ dRow, dCol }) => {
-    let newRow = row + dRow
-    let newCol = col + dCol
-
-    while (isValidPosition(newRow, newCol)) {
-      const target = getPieceAt(board, newRow, newCol)
-      if (!target) {
-        moves.push({ row: newRow, col: newCol })
-      } else {
-        if (target.color !== piece.color) {
-          moves.push({ row: newRow, col: newCol })
-        }
-        break
-      }
-      newRow += dRow
-      newCol += dCol
-    }
-  })
-
-  return moves
-}
-
-function getKnightMoves(board: SquareContent[][], row: number, col: number, piece: Piece): BoardPosition[] {
-  const moves: BoardPosition[] = []
-  const knightMoves = [
-    { dRow: -2, dCol: -1 },
-    { dRow: -2, dCol: 1 },
-    { dRow: -1, dCol: -2 },
-    { dRow: -1, dCol: 2 },
-    { dRow: 1, dCol: -2 },
-    { dRow: 1, dCol: 2 },
-    { dRow: 2, dCol: -1 },
-    { dRow: 2, dCol: 1 },
-  ]
-
-  knightMoves.forEach(({ dRow, dCol }) => {
-    const newRow = row + dRow
-    const newCol = col + dCol
-
-    if (isValidPosition(newRow, newCol)) {
-      const target = getPieceAt(board, newRow, newCol)
-      if (!target || target.color !== piece.color) {
-        moves.push({ row: newRow, col: newCol })
-      }
-    }
-  })
-
-  return moves
-}
-
-function getBishopMoves(board: SquareContent[][], row: number, col: number, piece: Piece): BoardPosition[] {
-  const moves: BoardPosition[] = []
-  const directions = [
-    { dRow: -1, dCol: -1 },
-    { dRow: -1, dCol: 1 },
-    { dRow: 1, dCol: -1 },
-    { dRow: 1, dCol: 1 },
-  ]
-
-  directions.forEach(({ dRow, dCol }) => {
-    let newRow = row + dRow
-    let newCol = col + dCol
-
-    while (isValidPosition(newRow, newCol)) {
-      const target = getPieceAt(board, newRow, newCol)
-      if (!target) {
-        moves.push({ row: newRow, col: newCol })
-      } else {
-        if (target.color !== piece.color) {
-          moves.push({ row: newRow, col: newCol })
-        }
-        break
-      }
-      newRow += dRow
-      newCol += dCol
-    }
-  })
-
-  return moves
-}
-
-function getQueenMoves(board: SquareContent[][], row: number, col: number, piece: Piece): BoardPosition[] {
-  const rookMoves = getRookMoves(board, row, col, piece)
-  const bishopMoves = getBishopMoves(board, row, col, piece)
-  return [...rookMoves, ...bishopMoves]
-}
-
-function getKingMoves(board: SquareContent[][], row: number, col: number, piece: Piece): BoardPosition[] {
-  const moves: BoardPosition[] = []
-  const kingMoves = [
-    { dRow: -1, dCol: -1 },
-    { dRow: -1, dCol: 0 },
-    { dRow: -1, dCol: 1 },
-    { dRow: 0, dCol: -1 },
-    { dRow: 0, dCol: 1 },
-    { dRow: 1, dCol: -1 },
-    { dRow: 1, dCol: 0 },
-    { dRow: 1, dCol: 1 },
-  ]
-
-  kingMoves.forEach(({ dRow, dCol }) => {
-    const newRow = row + dRow
-    const newCol = col + dCol
-
-    if (isValidPosition(newRow, newCol)) {
-      const target = getPieceAt(board, newRow, newCol)
-      if (!target || target.color !== piece.color) {
-        moves.push({ row: newRow, col: newCol })
-      }
-    }
-  })
-
-  return moves
-}
-
-export function getLegalMoves(
+export function getPieceAt(
   board: SquareContent[][],
   row: number,
-  col: number
+  col: number,
+): Piece | null {
+  if (!isValidPosition(row, col)) return null
+  return board[row][col] ?? null
+}
+
+export function isSameColor(a: Piece | null, b: Piece | null): boolean {
+  if (!a || !b) return false
+  return a.color === b.color
+}
+
+/**
+ * Legal destinations for the piece on a square — fully legal, so moves that
+ * would leave the mover's own king in check are already excluded, and castling
+ * and en passant are included.
+ *
+ * This takes the whole game state rather than just the board grid, because
+ * legality genuinely depends on more than piece placement: castling needs the
+ * rights, en passant needs the target square. That was the flaw in the previous
+ * signature, not an inconvenience of this one.
+ */
+export function getLegalMoves(
+  gameState: GameState,
+  row: number,
+  col: number,
 ): BoardPosition[] {
-  const piece = getPieceAt(board, row, col)
-  if (!piece) return []
+  const chess = load(gameState.fen)
+  if (!chess) return []
 
-  let moves: BoardPosition[] = []
+  const moves = chess.moves({ square: toAlgebraic({ row, col }), verbose: true })
 
-  switch (piece.type) {
-    case 'P':
-      moves = getPawnMoves(board, row, col, piece)
-      break
-    case 'R':
-      moves = getRookMoves(board, row, col, piece)
-      break
-    case 'N':
-      moves = getKnightMoves(board, row, col, piece)
-      break
-    case 'B':
-      moves = getBishopMoves(board, row, col, piece)
-      break
-    case 'Q':
-      moves = getQueenMoves(board, row, col, piece)
-      break
-    case 'K':
-      moves = getKingMoves(board, row, col, piece)
-      break
+  // A pawn reaching the last rank yields one move per promotion piece, all to
+  // the same square; the board only wants the square once.
+  const seen = new Set<string>()
+  const destinations: BoardPosition[] = []
+  for (const move of moves) {
+    if (seen.has(move.to)) continue
+    seen.add(move.to)
+    destinations.push(toPosition(move.to))
   }
-
-  return moves
+  return destinations
 }
 
 export function isLegalMove(
-  board: SquareContent[][],
-  from: BoardPosition,
-  to: BoardPosition
-): boolean {
-  const legalMoves = getLegalMoves(board, from.row, from.col)
-  return legalMoves.some((move) => move.row === to.row && move.col === to.col)
-}
-
-export function getPieceNotation(piece: Piece, from: BoardPosition, to: BoardPosition, isCapture: boolean): string {
-  const colLabels = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h']
-  const rowLabels = ['1', '2', '3', '4', '5', '6', '7', '8']
-  const toSquare = colLabels[to.col] + rowLabels[7 - to.row]
-
-  if (piece.type === 'P') {
-    if (isCapture) {
-      return colLabels[from.col] + 'x' + toSquare
-    }
-    return toSquare
-  }
-
-  const pieceLetters: Record<string, string> = {
-    N: 'N',
-    B: 'B',
-    R: 'R',
-    Q: 'Q',
-    K: 'K',
-  }
-
-  return (pieceLetters[piece.type] || '') + (isCapture ? 'x' : '') + toSquare
-}
-
-export function makeMove(
   gameState: GameState,
   from: BoardPosition,
-  to: BoardPosition
-): GameState | null {
-  const piece = getPieceAt(gameState.board, from.row, from.col)
+  to: BoardPosition,
+): boolean {
+  return getLegalMoves(gameState, from.row, from.col).some(
+    (m) => m.row === to.row && m.col === to.col,
+  )
+}
 
-  // Validate move
-  if (!piece || piece.color !== (gameState.whiteToMove ? 'white' : 'black')) {
-    return null
-  }
-
-  if (!isLegalMove(gameState.board, from, to)) {
-    return null
-  }
-
-  // Create new board with move applied
-  const newBoard = gameState.board.map((row) => [...row])
-  const capturedPiece = newBoard[to.row][to.col]
-
-  newBoard[to.row][to.col] = piece
-  newBoard[from.row][from.col] = null
-
-  // Check for pawn promotion
-  if (piece.type === 'P' && (to.row === 0 || to.row === 7)) {
-    newBoard[to.row][to.col] = { ...piece, type: 'Q' }
-  }
-
-  // Create move record
-  const isCapture = !!capturedPiece
-  const notation = getPieceNotation(piece, from, to, isCapture)
-  const newMove: Move = {
-    from,
-    to,
-    notation,
+/**
+ * Build the next state from a position that has just had a move applied.
+ * `applied` is the chess.js move record for that move.
+ */
+export function advance(
+  previous: GameState,
+  chess: Chess,
+  applied: { from: string; to: string; san: string; captured?: string; color: string },
+): GameState {
+  const move: Move = {
+    from: toPosition(applied.from),
+    to: toPosition(applied.to),
+    notation: applied.san,
     timestamp: Date.now(),
   }
 
-  // Update captured pieces
-  const newCapturedPieces = { ...gameState.capturedPieces }
-  if (capturedPiece) {
-    newCapturedPieces[capturedPiece.color].push(capturedPiece.type)
+  const capturedPieces = {
+    white: [...previous.capturedPieces.white],
+    black: [...previous.capturedPieces.black],
+  }
+  if (applied.captured) {
+    // The captured piece belongs to whoever did not make the move.
+    const owner = applied.color === 'w' ? 'black' : 'white'
+    capturedPieces[owner].push(applied.captured.toUpperCase() as PieceType)
   }
 
-  // Create new game state
-  const newGameState: GameState = {
-    board: newBoard,
-    whiteToMove: !gameState.whiteToMove,
-    moves: [...gameState.moves, newMove],
-    status: 'playing',
+  return {
+    fen: chess.fen(),
+    board: boardFrom(chess),
+    whiteToMove: chess.turn() === 'w',
+    moves: [...previous.moves, move],
+    status: statusFrom(chess),
     selectedSquare: null,
-    lastMove: newMove,
-    capturedPieces: newCapturedPieces,
+    lastMove: move,
+    capturedPieces,
   }
-
-  return newGameState
 }
+
+/**
+ * Play a move. Returns null if it is illegal, so the caller can simply ignore
+ * it — a gaze mis-selection lands here constantly and must never corrupt the
+ * position.
+ *
+ * Promotion is taken automatically as a queen. Underpromotion is legal but
+ * vanishingly rare, and offering the choice would mean a four-way picker driven
+ * by dwell in the middle of a move.
+ */
+export function makeMove(
+  gameState: GameState,
+  from: BoardPosition,
+  to: BoardPosition,
+  promotion: 'q' | 'r' | 'b' | 'n' = 'q',
+): GameState | null {
+  const chess = load(gameState.fen)
+  if (!chess) return null
+
+  try {
+    const applied = chess.move({
+      from: toAlgebraic(from),
+      to: toAlgebraic(to),
+      promotion,
+    })
+    if (!applied) return null
+    return advance(gameState, chess, applied)
+  } catch {
+    // chess.js throws on an illegal move; that is an expected outcome here.
+    return null
+  }
+}
+
+/** Re-export so callers have one place to import rule logic from. */
+export { statusFrom as deriveStatus, boardFrom as deriveBoard }

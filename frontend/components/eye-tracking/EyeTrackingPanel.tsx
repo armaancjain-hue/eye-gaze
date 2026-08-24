@@ -25,7 +25,10 @@ interface EyeTrackingPanelProps {
   driftWarning?: boolean
   /** True when the board has been resized enough that the fit no longer holds. */
   boardResized?: boolean
-  onRecalibrate?: () => void
+  /** Resolution the webcam actually negotiated. */
+  cameraResolution?: { width: number; height: number } | null
+  /** Detection throughput, frames per second. */
+  fps?: number
 }
 
 export default function EyeTrackingPanel({
@@ -40,7 +43,13 @@ export default function EyeTrackingPanel({
   targetConfidence = 0,
   driftWarning = false,
   boardResized = false,
+  cameraResolution = null,
+  fps = 0,
 }: EyeTrackingPanelProps) {
+  // Iris-landmark precision is bounded by how many pixels land on the eye, so a
+  // camera that quietly capped below 720p puts a floor under achievable accuracy
+  // that no amount of recalibration can lift.
+  const lowResolution = !!cameraResolution && cameraResolution.width < 1280
   const isActive = eyeTrackingState.status === 'active'
   const statusColor = isActive ? 'text-green-400' : 'text-yellow-400'
   const statusBgColor = isActive ? 'bg-green-400/10' : 'bg-yellow-400/10'
@@ -232,6 +241,21 @@ export default function EyeTrackingPanel({
 
       {/* Camera Permission */}
       <div className="text-xs text-muted-foreground space-y-2">
+        {cameraResolution && (
+          <p>
+            Capture:{' '}
+            <span className={lowResolution ? 'text-yellow-400' : 'text-foreground'}>
+              {cameraResolution.width}×{cameraResolution.height}
+            </span>
+            {fps > 0 && <span> · {fps} fps</span>}
+          </p>
+        )}
+        {lowResolution && (
+          <p className="text-yellow-400">
+            This webcam capped below 720p, which limits how precisely the iris can
+            be located.
+          </p>
+        )}
         <p>
           Camera:{' '}
           <span

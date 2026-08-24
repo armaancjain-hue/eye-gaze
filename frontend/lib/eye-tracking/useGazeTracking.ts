@@ -44,6 +44,14 @@ export interface UseGazeTracking {
   driftWarning: boolean
   /** True when the board has been resized enough to warrant recalibrating. */
   boardResized: boolean
+  /** What the camera actually delivered, which may be less than was requested. */
+  cameraResolution: { width: number; height: number } | null
+  /**
+   * Detection throughput. Higher capture resolution costs CPU per frame, and if
+   * this drops far below the display rate the voting window simply holds fewer
+   * samples — worth being able to see rather than guess at.
+   */
+  fps: number
   /** Request camera + start the detection loop. Idempotent. */
   start: () => Promise<void>
   /** Snapshot the current descriptor against a known target. */
@@ -84,6 +92,12 @@ export function useGazeTracking(): UseGazeTracking {
   const [calibrationScore, setCalibrationScore] = useState(0)
   const [driftWarning, setDriftWarning] = useState(false)
   const [boardResized, setBoardResized] = useState(false)
+  const [cameraResolution, setCameraResolution] = useState<{
+    width: number
+    height: number
+  } | null>(null)
+  const [fps, setFps] = useState(0)
+  const frameTimesRef = useRef<number[]>([])
   const [state, setState] = useState<EyeTrackingState>({
     status: 'inactive',
     gazePoint: { x: 0, y: 0, confidence: 0 },
@@ -117,6 +131,12 @@ export function useGazeTracking(): UseGazeTracking {
     const frame = tracker.process(video, now)
 
     if (frame) {
+      // Rolling frame rate over a one-second window.
+      const times = frameTimesRef.current
+      times.push(now)
+      while (times.length > 0 && now - times[0] > 1000) times.shift()
+      if (times.length > 1) setFps(times.length)
+
       // Deliberate-blink detection via a closed -> open transition.
       if (frame.eyesClosed) {
         if (closedSinceRef.current === null) closedSinceRef.current = now
@@ -189,8 +209,20 @@ export function useGazeTracking(): UseGazeTracking {
         syncCalibration(tracker)
       }
 
+      // 720p rather than the 480p this used to request. Iris-landmark precision
+      // is bounded by how many pixels actually land on the eye: at 640x480 a
+      // typical seated user's eye region is around 60x40px, which is *below* the
+      // refinement model's own input size, so it is upsampling guesswork. At
+      // 720p the same region is roughly double that in each axis, and landmark
+      // noise is the floor of the whole gaze pipeline. `ideal` (not `exact`)
+      // means a webcam that cannot manage it simply returns what it has.
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
+        video: {
+          facingMode: 'user',
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+          frameRate: { ideal: 30 },
+        },
         audio: false,
       })
       if (isStale()) {
@@ -200,6 +232,15 @@ export function useGazeTracking(): UseGazeTracking {
       }
       streamRef.current = stream
       setState((prev) => ({ ...prev, cameraPermission: 'granted' }))
+
+      // Report what the camera actually gave us. `ideal` constraints are a
+      // request, not a guarantee, and a webcam quietly capped at 480p is worth
+      // knowing about — it puts a floor under the achievable accuracy that no
+      // amount of calibration can lift.
+      const settings = stream.getVideoTracks()[0]?.getSettings()
+      if (settings?.width && settings?.height) {
+        setCameraResolution({ width: settings.width, height: settings.height })
+      }
 
       const video = videoRef.current
       if (video) {
@@ -276,6 +317,8 @@ export function useGazeTracking(): UseGazeTracking {
     calibrationScore,
     driftWarning,
     boardResized,
+    cameraResolution,
+    fps,
     start,
     makeSample,
     calibrate,
