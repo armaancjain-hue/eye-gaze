@@ -17,7 +17,7 @@ export default function TopNav() {
       transition={{ duration: 0.3 }}
       className="border-b border-border bg-card/50 backdrop-blur"
     >
-      <div className="px-6 py-4 flex items-center justify-between max-w-full">
+      <div className="px-6 py-2.5 flex items-center justify-between max-w-full">
         {/* Logo */}
         <Link href="/" className="flex items-center gap-3">
           <motion.div

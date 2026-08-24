@@ -30,17 +30,23 @@ export default function Chessboard({
     return getLegalMoves(gameState.board, gameState.selectedSquare.row, gameState.selectedSquare.col)
   }, [gameState.selectedSquare, gameState.board])
   return (
-    <div className="flex flex-col items-center justify-center gap-4 p-6 w-full min-w-0">
+    <div className="flex flex-col items-center justify-center gap-2 p-2 w-full min-w-0">
       {/* Board — scales to the available space and never overflows. Its width is
-          the smallest of: the container, a share of viewport height (so it also
-          fits vertically), and a comfortable maximum. Square cells are `1fr`
-          columns with a 1:1 aspect ratio, so everything derives from that width. */}
+          the smallest of: the container, the leftover viewport height after the
+          top bar / labels / status (so it also fits vertically without clipping),
+          and a large maximum for big monitors. Bigger squares are the single most
+          reliable accuracy win: gaze error stays roughly fixed in pixels, so wider
+          targets are hit far more often. Square cells are `1fr` columns with a 1:1
+          aspect ratio, so everything derives from that width. */}
+      {/* Opacity-only entrance: a `scale` here would leave the board rendered at
+          <100% if the animation is ever interrupted or throttled, silently
+          shrinking every square — the opposite of what we want for accuracy. */}
       <motion.div
-        initial={{ opacity: 0, scale: 0.95 }}
-        animate={{ opacity: 1, scale: 1 }}
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
         transition={{ duration: 0.4 }}
         className="rounded-lg overflow-hidden border-2 border-primary/30 shadow-2xl bg-background"
-        style={{ width: 'min(100%, 82vh, 880px)' }}
+        style={{ width: 'min(100%, calc(100vh - 150px), 1180px)' }}
       >
         <div
           className="grid"

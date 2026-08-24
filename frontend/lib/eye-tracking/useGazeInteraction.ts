@@ -18,10 +18,11 @@ interface UseGazeInteractionOptions {
 }
 
 /** How persistently the gaze must sit on a new square before the dwell target
- *  switches to it. At the 40ms loop cadence, 2 frames ≈ 80ms of stability,
- *  enough to reject single-frame jitter across a square boundary without any
- *  perceptible lag when the user genuinely looks elsewhere. */
-const SWITCH_STABILITY_FRAMES = 2
+ *  switches to it. At the 40ms loop cadence, 3 frames ≈ 120ms of stability,
+ *  enough to reject brief jitter across a square boundary (which otherwise resets
+ *  an in-progress dwell onto the wrong square) while staying imperceptible when
+ *  the user genuinely looks elsewhere. */
+const SWITCH_STABILITY_FRAMES = 3
 
 /** How far outside a square's centre the gaze may fall and still resolve to it,
  *  as a fraction of the square's size. Snapping to the nearest centre keeps the

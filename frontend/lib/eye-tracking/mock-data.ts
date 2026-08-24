@@ -15,7 +15,9 @@ export const createInitialEyeTrackingState = (): EyeTrackingState => {
 }
 
 export const DEFAULT_ACCESSIBILITY_SETTINGS: AccessibilitySettings = {
-  dwellTime: 400,
+  // 550ms is a calmer default: long enough that a stray glance across a square
+  // doesn't select it, short enough to stay responsive. Tunable in settings.
+  dwellTime: 550,
   blinkSensitivity: 'medium',
   highContrast: false,
   largeCursor: false,

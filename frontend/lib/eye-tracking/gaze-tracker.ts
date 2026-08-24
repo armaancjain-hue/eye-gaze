@@ -37,6 +37,17 @@ const LEFT_EYE_INNER = 362
 const LEFT_EYE_OUTER = 263
 const LEFT_IRIS_CENTER = 473
 
+// How fast the adaptive source smoothing opens up as the eyes move. At a
+// fixation `speed` ≈ 0 so alpha sits at its heavy floor (jitter crushed); during
+// a saccade `speed` is large so alpha rises and the estimate keeps up instead of
+// lagging. Tuned against the ~±0.2 range of the normalised iris offset.
+const FEATURE_SPEED_GAIN = 4
+
+// A frame only feeds calibration if the eyes are open past this blink score. Iris
+// landmarks are unreliable while the lids are closing, so sampling through a
+// blink would poison the fit — we drop those frames instead.
+const RELIABLE_BLINK_MAX = 0.35
+
 export interface FrameResult {
   facePresent: boolean
   /** Smoothed gaze point in CSS pixels relative to the viewport. */
@@ -161,6 +172,11 @@ export class GazeTracker {
   private smGy: number | null = null
   private readonly featureAlpha = 0.08
 
+  // Whether the most recent processed frame is trustworthy enough to calibrate
+  // against (face present, eyes open). Gates makeSample so blinks/face-loss during
+  // the calibration sequence can't corrupt the model.
+  private lastReliable = false
+
   get hasCalibration(): boolean {
     return this.calibration !== null
   }
@@ -201,6 +217,7 @@ export class GazeTracker {
 
     const landmarks = result.faceLandmarks?.[0]
     if (!landmarks) {
+      this.lastReliable = false
       return {
         facePresent: false,
         gazePoint: { x: this.lastX, y: this.lastY },
@@ -228,6 +245,8 @@ export class GazeTracker {
 
     const blinkScore = this.extractBlink(result)
     const eyesClosed = blinkScore > 0.5
+    // Reliable for calibration only while the eyes are clearly open.
+    this.lastReliable = blinkScore < RELIABLE_BLINK_MAX
 
     // Confidence drops while blinking and when uncalibrated.
     const base = this.calibration ? 0.95 : 0.6
@@ -268,8 +287,22 @@ export class GazeTracker {
     // image's left. Then smooth at the source to kill the residual jitter.
     const rawGx = -((right.gx + left.gx) / 2)
     const rawGy = (right.gy + left.gy) / 2
-    this.smGx = this.smGx === null ? rawGx : this.smGx + this.featureAlpha * (rawGx - this.smGx)
-    this.smGy = this.smGy === null ? rawGy : this.smGy + this.featureAlpha * (rawGy - this.smGy)
+    if (this.smGx === null || this.smGy === null) {
+      this.smGx = rawGx
+      this.smGy = rawGy
+    } else {
+      // Adaptive smoothing. At a fixation the eyes are nearly still, so `speed`
+      // ≈ 0, alpha stays at the heavy floor, and iris jitter is crushed — which
+      // is what lets a dwell settle on one square. During a saccade the raw
+      // signal jumps, alpha opens up, and the estimate catches the new target
+      // instead of lagging ~200ms behind. At rest this is identical to the old
+      // fixed-alpha smoothing, so it can only help responsiveness, never hurt
+      // dwell stability.
+      const speed = Math.hypot(rawGx - this.smGx, rawGy - this.smGy)
+      const alpha = Math.min(0.5, this.featureAlpha + speed * FEATURE_SPEED_GAIN)
+      this.smGx += alpha * (rawGx - this.smGx)
+      this.smGy += alpha * (rawGy - this.smGy)
+    }
 
     // Head forward vector from the facial transformation matrix (column-major).
     // Column 2 is the local +Z axis in world space -> where the face points.
@@ -299,9 +332,13 @@ export class GazeTracker {
 
   // --- Calibration -------------------------------------------------------
 
-  /** Snapshot the current raw feature paired with a known screen target. */
+  /**
+   * Snapshot the current raw feature paired with a known screen target.
+   * Returns null when the latest frame is unreliable (mid-blink or no face) so
+   * the caller can simply skip and retry — bad frames never reach the fit.
+   */
   makeSample(screenX: number, screenY: number): CalibrationSample | null {
-    if (!this.lastFeature) return null
+    if (!this.lastFeature || !this.lastReliable) return null
     return { feature: { ...this.lastFeature }, screenX, screenY }
   }
 

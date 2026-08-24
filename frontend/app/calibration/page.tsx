@@ -8,7 +8,10 @@ import Link from 'next/link'
 import { useGazeTracking } from '@/lib/eye-tracking/useGazeTracking'
 import type { CalibrationSample } from '@/lib/eye-tracking/calibration'
 
-// Nine fixation targets spread across the viewport (fractions of w/h).
+// Thirteen fixation targets spread across the viewport (fractions of w/h): a
+// 3×3 grid plus the four edge midpoints. More points better constrain the
+// quadratic gaze model (8 basis terms), so it interpolates the screen instead of
+// overfitting to nine noisy anchors.
 const CALIBRATION_POINTS: { fx: number; fy: number }[] = [
   { fx: 0.12, fy: 0.15 },
   { fx: 0.5, fy: 0.15 },
@@ -19,11 +22,20 @@ const CALIBRATION_POINTS: { fx: number; fy: number }[] = [
   { fx: 0.12, fy: 0.85 },
   { fx: 0.5, fy: 0.85 },
   { fx: 0.88, fy: 0.85 },
+  // Edge midpoints — extra support where the iris/screen mapping bends most.
+  { fx: 0.5, fy: 0.32 },
+  { fx: 0.5, fy: 0.68 },
+  { fx: 0.3, fy: 0.5 },
+  { fx: 0.7, fy: 0.5 },
 ]
 
-const SETTLE_MS = 900 // let the eye land on the dot before sampling
-const SAMPLES_PER_POINT = 12
-const SAMPLE_INTERVAL_MS = 50
+const SETTLE_MS = 800 // let the eye land on the dot before sampling
+// We keep sampling a point until this many *valid* (eyes-open, face-present)
+// frames land, or we hit the attempt cap — so a blink mid-point just costs a few
+// extra frames instead of injecting garbage into the fit.
+const VALID_SAMPLES_PER_POINT = 10
+const MAX_ATTEMPTS_PER_POINT = 32
+const SAMPLE_INTERVAL_MS = 45
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
@@ -82,10 +94,21 @@ export default function CalibrationPage() {
         const targetX = p.fx * window.innerWidth
         const targetY = p.fy * window.innerHeight
 
-        for (let s = 0; s < SAMPLES_PER_POINT; s++) {
+        // Gather valid frames, tolerating blinks: makeSample returns null while
+        // the eyes are closed or the face is lost, so we just keep trying.
+        let collected = 0
+        let attempts = 0
+        while (
+          collected < VALID_SAMPLES_PER_POINT &&
+          attempts < MAX_ATTEMPTS_PER_POINT
+        ) {
           if (!mountedRef.current) return
+          attempts++
           const sample = gaze.makeSample(targetX, targetY)
-          if (sample) samples.push(sample)
+          if (sample) {
+            samples.push(sample)
+            collected++
+          }
           await sleep(SAMPLE_INTERVAL_MS)
         }
       }
@@ -210,8 +233,8 @@ export default function CalibrationPage() {
             <div className="space-y-2">
               <h1 className="text-3xl font-bold text-foreground">Calibrate eye tracking</h1>
               <p className="text-muted-foreground">
-                We’ll show nine dots around the screen. Look at each one and keep
-                your head still. Takes about 15 seconds.
+                We’ll show a series of dots around the screen. Look at each one
+                and keep your head still. Takes about 20 seconds.
               </p>
             </div>
             <Button

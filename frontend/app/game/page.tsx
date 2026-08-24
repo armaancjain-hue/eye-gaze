@@ -7,6 +7,7 @@ import { ChevronLeft, ChevronRight } from 'lucide-react'
 import Chessboard from '@/components/game/Chessboard'
 import LeftSidebar from '@/components/layout/LeftSidebar'
 import EyeTrackingPanel from '@/components/eye-tracking/EyeTrackingPanel'
+import GazeCursor from '@/components/eye-tracking/GazeCursor'
 import MoveHistoryPanel from '@/components/move-history/MoveHistoryPanel'
 import TopNav from '@/components/layout/TopNav'
 import AccessibilityMenu from '@/components/accessibility/AccessibilityMenu'
@@ -183,7 +184,10 @@ export default function GamePage() {
   }
 
   return (
-    <div className="min-h-screen bg-background flex flex-col">
+    // On desktop the game is locked to the viewport height (lg:h-screen +
+    // overflow-hidden) so the board can claim the full height instead of being
+    // pushed below the fold by a tall sidebar. Mobile keeps normal page scroll.
+    <div className="min-h-screen lg:h-screen lg:overflow-hidden bg-background flex flex-col">
       {/* Accessibility Settings Menu */}
       <AccessibilityMenu
         isOpen={settingsOpen}
@@ -195,11 +199,22 @@ export default function GamePage() {
       {/* Top Navigation */}
       <TopNav />
 
+      {/* Full-screen gaze cursor so the player can see (and correct) where the
+          tracker thinks they're looking, with a ring that fills as a dwell lands. */}
+      <GazeCursor
+        gazePoint={gaze.state.gazePoint}
+        active={gaze.isReady && gaze.state.status === 'active'}
+        dwellProgress={dwellProgress}
+        dwelling={!!dwellSquare}
+        largeCursor={accessibility.largeCursor}
+        reducedMotion={accessibility.reducedMotion}
+      />
+
       {/* Main Game Area */}
-      <div className="flex-1 flex gap-6 p-6 overflow-hidden">
+      <div className="flex-1 flex gap-3 p-3 overflow-hidden lg:min-h-0">
         {/* Left Sidebar - Controls (collapsible on lg+) */}
         {leftOpen ? (
-          <div className="w-64 hidden lg:flex flex-col shrink-0">
+          <div className="w-56 hidden lg:flex flex-col shrink-0 lg:min-h-0 lg:overflow-y-auto custom-scrollbar">
             <div className="flex justify-end mb-2">
               <button
                 onClick={() => setLeftOpen(false)}
@@ -231,10 +246,11 @@ export default function GamePage() {
           </button>
         )}
 
-        {/* Center - Chessboard */}
+        {/* Center - Chessboard. Opacity-only entrance so the board's rendered
+            size never depends on a scale animation finishing. */}
         <motion.div
-          initial={{ opacity: 0, scale: 0.95 }}
-          animate={{ opacity: 1, scale: 1 }}
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
           transition={{ duration: 0.4 }}
           className="flex-1 min-w-0 flex items-center justify-center"
         >
@@ -249,8 +265,8 @@ export default function GamePage() {
 
         {/* Right Sidebar - Eye Tracking & Move History (collapsible on lg+) */}
         {rightOpen ? (
-          <div className="w-80 hidden lg:flex gap-6 flex-col shrink-0">
-            <div className="flex justify-start">
+          <div className="w-72 hidden lg:flex gap-4 flex-col shrink-0 lg:min-h-0 lg:overflow-y-auto custom-scrollbar">
+            <div className="flex justify-start shrink-0">
               <button
                 onClick={() => setRightOpen(false)}
                 title="Collapse panel"
@@ -260,7 +276,10 @@ export default function GamePage() {
                 <ChevronRight className="w-4 h-4" />
               </button>
             </div>
-            <div className="flex-1">
+            {/* Tracking panel keeps its natural height; move history takes the
+                remaining space and scrolls internally so nothing stretches the
+                row past the viewport. */}
+            <div className="shrink-0">
               <EyeTrackingPanel
                 eyeTrackingState={eyeTrackingState}
                 onCalibrationClick={handleCalibration}
@@ -270,7 +289,7 @@ export default function GamePage() {
                 onEnableCamera={gaze.start}
               />
             </div>
-            <div className="flex-1 overflow-hidden">
+            <div className="flex-1 min-h-0 overflow-hidden">
               <MoveHistoryPanel moves={gameState.moves} />
             </div>
           </div>
