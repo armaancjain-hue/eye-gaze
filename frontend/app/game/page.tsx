@@ -7,6 +7,7 @@ import Chessboard from '@/components/game/Chessboard'
 import LeftSidebar from '@/components/layout/LeftSidebar'
 import EyeTrackingPanel from '@/components/eye-tracking/EyeTrackingPanel'
 import GazeCursor from '@/components/eye-tracking/GazeCursor'
+import GazeDebugOverlay from '@/components/eye-tracking/GazeDebugOverlay'
 import CalibrationOverlay from '@/components/eye-tracking/CalibrationOverlay'
 import MoveHistoryPanel from '@/components/move-history/MoveHistoryPanel'
 import GameOverModal from '@/components/game/GameOverModal'
@@ -60,6 +61,8 @@ export default function GamePage() {
   const [isFullscreen, setIsFullscreen] = useState(false)
   const focusMode = isFullscreen
   const [showCalibration, setShowCalibration] = useState(false)
+  const [debugGaze, setDebugGaze] = useState(false)
+  const [calibrationProgress, setCalibrationProgress] = useState(0)
   /** Board square edge in px, polled while in gaze mode for the size gate. */
   const [squareSize, setSquareSize] = useState(0)
   const rootRef = useRef<HTMLDivElement | null>(null)
@@ -82,7 +85,12 @@ export default function GamePage() {
 
   const eyeTrackingState = {
     ...gaze.state,
-    calibrationProgress: gaze.hasCalibration ? 100 : 0,
+    calibrationProgress: showCalibration
+      ? calibrationProgress
+      : gaze.hasCalibration
+        ? 100
+        : gaze.state.calibrationProgress,
+    status: showCalibration ? 'calibrating' as const : gaze.state.status,
   }
 
   // --- Fullscreen eye-control lifecycle ---------------------------------------
@@ -95,6 +103,17 @@ export default function GamePage() {
     }
     gaze.start()
     if (!gaze.hasCalibration) setShowCalibration(true)
+  }, [gaze])
+
+  const restartCalibration = useCallback(() => {
+    gaze.resetCalibration()
+    setCalibrationProgress(0)
+    const el = rootRef.current
+    if (el && !document.fullscreenElement) {
+      el.requestFullscreen().catch(() => {})
+    }
+    gaze.start()
+    setShowCalibration(true)
   }, [gaze])
 
   const exitEyeControl = useCallback(() => {
@@ -139,9 +158,11 @@ export default function GamePage() {
         else enterEyeControl()
       } else if (e.key === 'c' || e.key === 'C') {
         if (isFullscreen) {
-          gaze.resetCalibration()
-          setShowCalibration(true)
+          restartCalibration()
         }
+      } else if (e.key === 'd' || e.key === 'D') {
+        e.preventDefault()
+        setDebugGaze((enabled) => !enabled)
       } else if (e.key === 'v' || e.key === 'V') {
         e.preventDefault()
         setOrientation((o) => (o === 'white-top' ? 'white-bottom' : 'white-top'))
@@ -149,7 +170,7 @@ export default function GamePage() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [enterEyeControl, exitEyeControl, isFullscreen, gaze])
+  }, [enterEyeControl, exitEyeControl, isFullscreen, restartCalibration])
 
   // A live game can never be sitting on a dismissed result.
   useEffect(() => {
@@ -236,18 +257,25 @@ export default function GamePage() {
   const gazeControlReady =
     gaze.isReady && gaze.hasCalibration && isFullscreen && boardBigEnough && !showCalibration
 
-  const { dwellSquare, dwellProgress, confidence: dwellConfidence } = useGazeInteraction({
+  const {
+    rawSquare,
+    stableSquare,
+    dwellSquare,
+    dwellProgress,
+    confidence: dwellConfidence,
+    onBoard: gazeOnBoard,
+  } = useGazeInteraction({
     enabled: gazeControlReady && isHumanTurn,
     gazePoint: gaze.state.gazePoint,
+    rawGazePoint: gaze.state.rawGazePoint,
     dwellTime: accessibility.dwellTime,
-    calibrationScore: gaze.hasCalibration ? 0.85 : 0,
+    calibrationScore: gaze.calibrationModel?.qualityScore ?? 0,
     registerBlink: gaze.onBlink,
     onDwell: handleGazeDwell,
     onBlinkConfirm: handleBlinkConfirm,
   })
 
-  // Mouse fallback: click to select, click again to move. (Board clicks are also
-  // look-aligned calibration for WebEyeTrack, so they keep refining the model.)
+  // Mouse fallback: click to select, click again to move.
   const handleSquareClick = (row: number, col: number) => {
     if (!isHumanTurn) return
     setGameState((prev) => {
@@ -335,7 +363,7 @@ export default function GamePage() {
       {/* Full-screen gaze cursor. Only meaningful while gaze is actually driving,
           i.e. in fullscreen eye control. */}
       <GazeCursor
-        gazePoint={gaze.state.gazePoint}
+        gazePoint={gaze.state.correctedGazePoint}
         active={isFullscreen && gaze.isReady && gaze.state.status === 'active'}
         dwellProgress={dwellProgress}
         dwelling={!!dwellSquare}
@@ -343,12 +371,31 @@ export default function GamePage() {
         reducedMotion={accessibility.reducedMotion}
       />
 
+      <GazeDebugOverlay
+        active={debugGaze && isFullscreen && gaze.isReady}
+        state={eyeTrackingState}
+        rawSquare={rawSquare}
+        stableSquare={stableSquare}
+        confidence={dwellConfidence}
+        fixationProgress={dwellProgress}
+        onBoard={gazeOnBoard}
+      />
+
       {/* Calibration overlay (only in gaze mode, until calibrated). */}
       {isFullscreen && showCalibration && (
         <CalibrationOverlay
-          onNoteSample={gaze.noteCalibrationSample}
-          onComplete={() => setShowCalibration(false)}
-          onCancel={() => setShowCalibration(false)}
+          rawGazePointRef={gaze.rawGazePointRef}
+          onProgress={(completed, total) => {
+            setCalibrationProgress((completed / total) * 100)
+          }}
+          onComplete={(model) => {
+            gaze.setCalibrationModel(model)
+            setCalibrationProgress(100)
+            setShowCalibration(false)
+          }}
+          onCancel={() => {
+            setShowCalibration(false)
+          }}
         />
       )}
 
@@ -466,6 +513,9 @@ export default function GamePage() {
               <EyeTrackingPanel
                 eyeTrackingState={eyeTrackingState}
                 onStartEyeControl={enterEyeControl}
+                onRecalibrate={restartCalibration}
+                onToggleDebug={() => setDebugGaze((enabled) => !enabled)}
+                debugEnabled={debugGaze}
                 isReady={gaze.isReady}
                 error={gaze.error}
                 hasCalibration={gaze.hasCalibration}
@@ -509,6 +559,9 @@ export default function GamePage() {
           <EyeTrackingPanel
             eyeTrackingState={eyeTrackingState}
             onStartEyeControl={enterEyeControl}
+            onRecalibrate={restartCalibration}
+            onToggleDebug={() => setDebugGaze((enabled) => !enabled)}
+            debugEnabled={debugGaze}
             isReady={gaze.isReady}
             error={gaze.error}
             hasCalibration={gaze.hasCalibration}

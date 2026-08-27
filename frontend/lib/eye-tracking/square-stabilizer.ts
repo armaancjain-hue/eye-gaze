@@ -28,6 +28,8 @@ export interface StabilizerOptions {
   voteWindowMs: number
   /** Fraction of weighted votes the winner needs to count as stable. */
   minVoteFraction: number
+  /** Extra evidence needed before switching away from the current dwell target. */
+  switchVoteFraction: number
   /** Confidence a square must reach for its dwell to be allowed to commit. */
   minCommitConfidence: number
   /** How far outside the board a point may stray, in squares. */
@@ -37,11 +39,12 @@ export interface StabilizerOptions {
 }
 
 export const DEFAULT_STABILIZER_OPTIONS: StabilizerOptions = {
-  dwellMs: 600,
+  dwellMs: 700,
   // ~300ms holds roughly 10 frames at 30fps: long enough for a majority to be
   // meaningful, short enough that switching squares still feels immediate.
   voteWindowMs: 300,
   minVoteFraction: 0.6,
+  switchVoteFraction: 0.72,
   minCommitConfidence: 0.45,
   edgeTolerance: 0.45,
   calibrationScore: 0.6,
@@ -198,16 +201,40 @@ export class SquareStabilizer {
     let winner: BoardPosition | null = null
     let winnerCell: BoardPosition | null = null
     let winnerWeight = 0
+    let targetWeight = 0
     tally.forEach((entry) => {
       if (entry.weight > winnerWeight) {
         winnerWeight = entry.weight
         winner = entry.square
         winnerCell = entry.cell
       }
+      if (sameSquare(this.target, entry.square)) targetWeight = entry.weight
     })
 
-    const voteFraction = totalWeight > 0 ? winnerWeight / totalWeight : 0
+    let voteFraction = totalWeight > 0 ? winnerWeight / totalWeight : 0
+    const targetVoteFraction = totalWeight > 0 ? targetWeight / totalWeight : 0
     const onBoard = totalWeight > 0 && offBoardWeight < totalWeight / 2
+
+    // Hysteresis: when the gaze hovers on a boundary, the current dwell target
+    // keeps ownership until the new square has a stronger-than-normal majority.
+    if (
+      this.target &&
+      winner &&
+      !sameSquare(this.target, winner) &&
+      targetVoteFraction >= 0.34 &&
+      voteFraction < this.options.switchVoteFraction
+    ) {
+      const targetEntry = Array.from(tally.values()).find((entry) =>
+        sameSquare(entry.square, this.target),
+      )
+      if (targetEntry) {
+        winner = targetEntry.square
+        winnerCell = targetEntry.cell
+        winnerWeight = targetEntry.weight
+        voteFraction = targetVoteFraction
+      }
+    }
+
     const stable = winner !== null && voteFraction >= this.options.minVoteFraction
 
     // --- Confidence ----------------------------------------------------------

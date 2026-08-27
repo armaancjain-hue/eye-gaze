@@ -1,25 +1,31 @@
 import { EyeTrackingState, AccessibilitySettings } from './types'
 
 export const createInitialEyeTrackingState = (): EyeTrackingState => {
+  const gazePoint = {
+    x: window.innerWidth / 2,
+    y: window.innerHeight / 2,
+    confidence: 0.95,
+  }
   return {
     status: 'active',
-    gazePoint: {
-      x: window.innerWidth / 2,
-      y: window.innerHeight / 2,
-      confidence: 0.95,
-    },
+    rawGazePoint: gazePoint,
+    correctedGazePoint: gazePoint,
+    gazePoint,
     blinkDetected: false,
     calibrationProgress: 100,
+    isCalibrated: true,
+    calibrationQuality: 1,
+    calibrationErrorSquares: 0,
+    trackingIssue: null,
     cameraPermission: 'granted',
   }
 }
 
 export const DEFAULT_ACCESSIBILITY_SETTINGS: AccessibilitySettings = {
-  // 600ms sits in the middle of the usable dwell band: long enough that a glance
-  // passing over a square can't select it (a saccade plus a brief fixation is
-  // well under half of it), short enough that deliberate selection doesn't feel
-  // like waiting. Tunable between 500 and 800ms in settings.
-  dwellTime: 600,
+  // 700ms is conservative for chess: long enough that a glance passing over a
+  // square can't trigger it, short enough that deliberate selection stays usable.
+  // Tunable between 500 and 1000ms in settings.
+  dwellTime: 700,
   // Fairly heavy smoothing by default so the cursor sits steady; users on a good
   // webcam can lower it for snappier tracking.
   smoothing: 70,

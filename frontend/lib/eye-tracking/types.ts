@@ -5,12 +5,30 @@ export interface GazePoint {
 }
 
 export type TrackingStatus = 'inactive' | 'calibrating' | 'active' | 'lost'
+export type TrackingIssue =
+  | 'camera-denied'
+  | 'camera-unavailable'
+  | 'model-loading'
+  | 'webeyetrack-not-initialized'
+  | 'no-face'
+  | 'calibration-incomplete'
+  | 'low-confidence'
+  | 'board-too-small'
 
 export interface EyeTrackingState {
   status: TrackingStatus
+  /** Raw WebEyeTrack point converted from normPog to viewport CSS pixels. */
+  rawGazePoint: GazePoint
+  /** Personalized board-corrected point in viewport CSS pixels. */
+  correctedGazePoint: GazePoint
+  /** Backward-compatible alias for the corrected point used by the UI cursor. */
   gazePoint: GazePoint
   blinkDetected: boolean
   calibrationProgress: number
+  isCalibrated: boolean
+  calibrationQuality: number
+  calibrationErrorSquares: number | null
+  trackingIssue: TrackingIssue | null
   cameraPermission: 'granted' | 'denied' | 'prompt'
 }
 

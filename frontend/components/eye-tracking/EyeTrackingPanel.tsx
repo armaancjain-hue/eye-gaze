@@ -1,16 +1,19 @@
 'use client'
 
 import { motion } from 'framer-motion'
-import { Eye, AlertCircle, CheckCircle2, Maximize2 } from 'lucide-react'
+import { Eye, AlertCircle, CheckCircle2, Maximize2, RefreshCw, Bug } from 'lucide-react'
 import { EyeTrackingState } from '@/lib/eye-tracking/types'
 
 interface EyeTrackingPanelProps {
   eyeTrackingState: EyeTrackingState
   /** Enter fullscreen eye control (starts the tracker, shows calibration if needed). */
   onStartEyeControl: () => void
+  onRecalibrate: () => void
+  onToggleDebug: () => void
+  debugEnabled: boolean
   isReady: boolean
   error: string | null
-  /** True once enough look-aligned calibration clicks have been collected. */
+  /** True once a board-specific calibration correction model exists. */
   hasCalibration: boolean
   /** How many calibration samples have been collected this session. */
   calibrationSampleCount: number
@@ -27,6 +30,9 @@ interface EyeTrackingPanelProps {
 export default function EyeTrackingPanel({
   eyeTrackingState,
   onStartEyeControl,
+  onRecalibrate,
+  onToggleDebug,
+  debugEnabled,
   isReady,
   error,
   hasCalibration,
@@ -48,6 +54,9 @@ export default function EyeTrackingPanel({
         : eyeTrackingState.status === 'lost'
           ? 'Signal Lost'
           : 'Tracking Active'
+  const calibrationText = eyeTrackingState.calibrationErrorSquares
+    ? `${eyeTrackingState.calibrationErrorSquares.toFixed(2)} squares median validation error`
+    : null
 
   return (
     <motion.div
@@ -78,6 +87,29 @@ export default function EyeTrackingPanel({
         <Maximize2 className="w-4 h-4" />
         {isReady ? (hasCalibration ? 'Enter eye control' : 'Calibrate in fullscreen') : 'Start eye control'}
       </motion.button>
+      <div className="grid grid-cols-2 gap-2">
+        <button
+          type="button"
+          onClick={onRecalibrate}
+          className="flex items-center justify-center gap-2 rounded-lg border border-border bg-muted px-3 py-2 text-xs font-medium text-muted-foreground hover:text-foreground"
+        >
+          <RefreshCw className="w-3.5 h-3.5" />
+          Recalibrate
+        </button>
+        <button
+          type="button"
+          onClick={onToggleDebug}
+          aria-pressed={debugEnabled}
+          className={`flex items-center justify-center gap-2 rounded-lg border px-3 py-2 text-xs font-medium ${
+            debugEnabled
+              ? 'border-primary bg-primary/15 text-primary'
+              : 'border-border bg-muted text-muted-foreground hover:text-foreground'
+          }`}
+        >
+          <Bug className="w-3.5 h-3.5" />
+          Debug
+        </button>
+      </div>
       <p className="text-[11px] text-muted-foreground/80">
         Press <kbd className="px-1 py-0.5 rounded border border-border bg-muted font-mono">F</kbd> to
         toggle, <kbd className="px-1 py-0.5 rounded border border-border bg-muted font-mono">C</kbd> to
@@ -101,8 +133,13 @@ export default function EyeTrackingPanel({
         ) : (
           <AlertCircle className={`w-4 h-4 ${statusColor}`} />
         )}
-        <span className={statusColor}>{statusText}</span>
+            <span className={statusColor}>{statusText}</span>
       </motion.div>
+      {eyeTrackingState.trackingIssue && (
+        <p className="text-xs text-yellow-400">
+          {eyeTrackingState.trackingIssue.replaceAll('-', ' ')}
+        </p>
+      )}
 
       {/* Confidence Meter */}
       <div className="space-y-2">
@@ -146,11 +183,12 @@ export default function EyeTrackingPanel({
         {hasCalibration ? (
           <p className="text-xs text-muted-foreground">
             <span className="font-semibold text-green-400">Calibrated</span> ·{' '}
-            {calibrationSampleCount} samples. It keeps improving as you look-and-click.
+            {calibrationSampleCount} samples
+            {calibrationText ? ` · ${calibrationText}` : ''}
           </p>
         ) : (
           <p className="text-xs text-yellow-400">
-            Not calibrated — enter eye control and click the dots{' '}
+            Not calibrated — enter eye control and look at the targets{' '}
             {calibrationSampleCount > 0 ? `(${calibrationSampleCount} so far)` : ''}.
           </p>
         )}

@@ -3,17 +3,24 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { WebEyeTrackSource } from './webeyetrack-source'
 import type { EyeTrackingState, GazePoint, TrackingStatus } from './types'
+import {
+  applyCalibrationModel,
+  clearCalibrationModel,
+  loadCalibrationModel,
+  saveCalibrationModel,
+  type CalibrationModel,
+} from './calibration-model'
+import { getBoardGeometry, remapForBoard } from './board-mapping'
 
 /** No gaze result for this long (ms) flips status to "lost". */
 const FACE_LOST_MS = 1000
 
 /**
- * Calibration samples (look-aligned clicks fed to WebEyeTrack) needed before gaze
- * selection is trusted. The dedicated overlay collects a grid of these; anything
- * fewer cannot personalise the model enough to tell neighbouring squares apart, so
- * squares stay mouse-only until then rather than selecting the wrong piece.
+ * Board-specific gaze samples needed before square selection is trusted. Fewer
+ * points cannot fit a stable chessboard correction over all 64 squares.
  */
-const MIN_CALIBRATION_SAMPLES = 9
+const MIN_CALIBRATION_SAMPLES = 16
+const STATE_COMMIT_MS = 50
 
 export interface UseGazeTracking {
   /** Attach to the hidden <video id="webcam"> WebEyeTrack drives. */
@@ -22,18 +29,22 @@ export interface UseGazeTracking {
   /** True once the worker + models are up and gaze results are flowing. */
   isReady: boolean
   error: string | null
-  /** True once enough look-aligned calibration clicks have been collected. */
+  /** True once a persisted or newly collected board calibration model exists. */
   hasCalibration: boolean
+  calibrationModel: CalibrationModel | null
   /** How many calibration samples have been collected this session. */
   calibrationSampleCount: number
+  rawGazePointRef: React.RefObject<GazePoint>
   /** What the camera actually delivered, once known. */
   cameraResolution: { width: number; height: number } | null
   /** Detection throughput (gaze results per second). */
   fps: number
   /** Request camera + start WebEyeTrack. Idempotent. */
   start: () => Promise<void>
-  /** Record one collected calibration sample (a look-aligned click). */
+  /** Record one collected calibration sample for progress-only callers. */
   noteCalibrationSample: () => void
+  /** Persist a completed chessboard calibration correction model. */
+  setCalibrationModel: (model: CalibrationModel) => void
   /** Forget this session's collected samples (the UI's calibration gate). */
   resetCalibration: () => void
   /** Subscribe to deliberate-blink events. Returns an unsubscribe fn. */
@@ -46,11 +57,19 @@ export function useGazeTracking(): UseGazeTracking {
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const sourceRef = useRef<WebEyeTrackSource | null>(null)
   const startedRef = useRef(false)
+  const calibrationModelRef = useRef<CalibrationModel | null>(null)
+  const calibrationSampleCountRef = useRef(0)
+  const smoothingStrengthRef = useRef(0.7)
+  const rawGazePointRef = useRef<GazePoint>({ x: 0, y: 0, confidence: 0 })
+  const correctedGazePointRef = useRef<GazePoint>({ x: 0, y: 0, confidence: 0 })
+  const smoothedPointRef = useRef<{ x: number; y: number } | null>(null)
+  const lastStateCommitAtRef = useRef(0)
 
   const blinkSubscribers = useRef<Set<() => void>>(new Set())
 
   const [isReady, setIsReady] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [calibrationModel, setCalibrationModelState] = useState<CalibrationModel | null>(null)
   const [calibrationSampleCount, setCalibrationSampleCount] = useState(0)
   const [cameraResolution, setCameraResolution] = useState<{
     width: number
@@ -59,11 +78,34 @@ export function useGazeTracking(): UseGazeTracking {
   const [fps, setFps] = useState(0)
   const [state, setState] = useState<EyeTrackingState>({
     status: 'inactive',
+    rawGazePoint: rawGazePointRef.current,
+    correctedGazePoint: correctedGazePointRef.current,
     gazePoint: { x: 0, y: 0, confidence: 0 },
     blinkDetected: false,
     calibrationProgress: 0,
+    isCalibrated: false,
+    calibrationQuality: 0,
+    calibrationErrorSquares: null,
+    trackingIssue: 'webeyetrack-not-initialized',
     cameraPermission: 'prompt',
   })
+
+  useEffect(() => {
+    const stored = loadCalibrationModel()
+    if (!stored) return
+    calibrationModelRef.current = stored
+    calibrationSampleCountRef.current = stored.sampleCount
+    setCalibrationModelState(stored)
+    setCalibrationSampleCount(stored.sampleCount)
+    setState((prev) => ({
+      ...prev,
+      isCalibrated: true,
+      calibrationProgress: 100,
+      calibrationQuality: stored.qualityScore,
+      calibrationErrorSquares: stored.validationErrorSquares,
+      trackingIssue: stored.qualityScore < 0.4 ? 'low-confidence' : prev.trackingIssue,
+    }))
+  }, [])
 
   const onBlink = useCallback((cb: () => void) => {
     blinkSubscribers.current.add(cb)
@@ -73,14 +115,49 @@ export function useGazeTracking(): UseGazeTracking {
   }, [])
 
   const noteCalibrationSample = useCallback(() => {
-    setCalibrationSampleCount((n) => n + 1)
+    setCalibrationSampleCount((n) => {
+      const next = n + 1
+      calibrationSampleCountRef.current = next
+      return next
+    })
+  }, [])
+
+  const setCalibrationModel = useCallback((model: CalibrationModel) => {
+    calibrationModelRef.current = model
+    calibrationSampleCountRef.current = model.sampleCount
+    smoothedPointRef.current = null
+    saveCalibrationModel(model)
+    setCalibrationModelState(model)
+    setCalibrationSampleCount(model.sampleCount)
+    setState((prev) => ({
+      ...prev,
+      isCalibrated: true,
+      calibrationProgress: 100,
+      calibrationQuality: model.qualityScore,
+      calibrationErrorSquares: model.validationErrorSquares,
+      trackingIssue: model.qualityScore < 0.4 ? 'low-confidence' : null,
+    }))
   }, [])
 
   const resetCalibration = useCallback(() => {
+    clearCalibrationModel()
+    calibrationModelRef.current = null
+    calibrationSampleCountRef.current = 0
+    smoothedPointRef.current = null
+    setCalibrationModelState(null)
     setCalibrationSampleCount(0)
+    setState((prev) => ({
+      ...prev,
+      isCalibrated: false,
+      calibrationProgress: 0,
+      calibrationQuality: 0,
+      calibrationErrorSquares: null,
+      trackingIssue: 'calibration-incomplete',
+    }))
   }, [])
 
   const setSmoothing = useCallback((strength: number) => {
+    smoothingStrengthRef.current = Math.max(0, Math.min(1, strength))
     sourceRef.current?.setSmoothing(strength)
   }, [])
 
@@ -90,14 +167,60 @@ export function useGazeTracking(): UseGazeTracking {
     if (!video) return
     startedRef.current = true
     setError(null)
+    setState((prev) => ({
+      ...prev,
+      status: 'inactive',
+      trackingIssue: 'model-loading',
+    }))
 
     const source = new WebEyeTrackSource(video, {
       onPoint: (point: GazePoint) => {
-        setState((prev) => ({
-          ...prev,
-          gazePoint: point,
-          blinkDetected: point.confidence < 0.5,
-        }))
+        const now = performance.now()
+        rawGazePointRef.current = point
+
+        const model = calibrationModelRef.current
+        const geometry = getBoardGeometry(now)
+        const modelCorrected = applyCalibrationModel(model, point)
+        const boardCorrected = remapForBoard(modelCorrected, model?.boardRect ?? null, geometry)
+        const strength = smoothingStrengthRef.current
+        const alpha = 0.62 - 0.5 * strength
+        const last = smoothedPointRef.current
+        const smoothed = last
+          ? {
+              x: last.x + alpha * (boardCorrected.x - last.x),
+              y: last.y + alpha * (boardCorrected.y - last.y),
+            }
+          : boardCorrected
+        smoothedPointRef.current = smoothed
+
+        const corrected: GazePoint = {
+          ...smoothed,
+          confidence: point.confidence * (model ? Math.max(0.2, model.qualityScore) : 0.3),
+        }
+        correctedGazePointRef.current = corrected
+
+        if (now - lastStateCommitAtRef.current >= STATE_COMMIT_MS) {
+          lastStateCommitAtRef.current = now
+          setState((prev) => ({
+            ...prev,
+            rawGazePoint: point,
+            correctedGazePoint: corrected,
+            gazePoint: corrected,
+            blinkDetected: point.confidence < 0.5,
+            isCalibrated: !!model,
+            calibrationProgress: model
+              ? 100
+              : Math.min(99, (calibrationSampleCountRef.current / MIN_CALIBRATION_SAMPLES) * 100),
+            calibrationQuality: model?.qualityScore ?? 0,
+            calibrationErrorSquares: model?.validationErrorSquares ?? null,
+            trackingIssue:
+              point.confidence < 0.4
+                ? 'low-confidence'
+                : model
+                  ? null
+                  : 'calibration-incomplete',
+          }))
+        }
       },
       onBlink: () => {
         setState((prev) => ({ ...prev, blinkDetected: true }))
@@ -105,7 +228,12 @@ export function useGazeTracking(): UseGazeTracking {
       },
       onReady: () => {
         setIsReady(true)
-        setState((prev) => ({ ...prev, status: 'active', cameraPermission: 'granted' }))
+        setState((prev) => ({
+          ...prev,
+          status: 'active',
+          cameraPermission: 'granted',
+          trackingIssue: calibrationModelRef.current ? null : 'calibration-incomplete',
+        }))
       },
       onError: (message: string) => {
         startedRef.current = false
@@ -114,6 +242,7 @@ export function useGazeTracking(): UseGazeTracking {
         setState((prev) => ({
           ...prev,
           status: 'inactive',
+          trackingIssue: denied ? 'camera-denied' : 'camera-unavailable',
           cameraPermission: denied ? 'denied' : prev.cameraPermission,
         }))
       },
@@ -131,10 +260,15 @@ export function useGazeTracking(): UseGazeTracking {
       if (!source) return
       setFps(source.fps)
       if (source.cameraResolution) setCameraResolution(source.cameraResolution)
-      const lost = source.msSinceLastResult() > FACE_LOST_MS
+      const lost = source.msSinceLastUsableResult() > FACE_LOST_MS
       setState((prev) => {
         const status: TrackingStatus = lost ? 'lost' : 'active'
-        return prev.status === status ? prev : { ...prev, status }
+        const trackingIssue = lost
+          ? source.trackingIssue ?? 'no-face'
+          : source.trackingIssue ?? (calibrationModelRef.current ? null : 'calibration-incomplete')
+        return prev.status === status && prev.trackingIssue === trackingIssue
+          ? prev
+          : { ...prev, status, trackingIssue }
       })
     }, 250)
     return () => clearInterval(id)
@@ -155,12 +289,15 @@ export function useGazeTracking(): UseGazeTracking {
     state,
     isReady,
     error,
-    hasCalibration: calibrationSampleCount >= MIN_CALIBRATION_SAMPLES,
+    hasCalibration: calibrationModel !== null,
+    calibrationModel,
     calibrationSampleCount,
+    rawGazePointRef,
     cameraResolution,
     fps,
     start,
     noteCalibrationSample,
+    setCalibrationModel,
     resetCalibration,
     onBlink,
     setSmoothing,

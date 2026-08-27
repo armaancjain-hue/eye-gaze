@@ -97,13 +97,12 @@ export default function AccessibilityMenu({
                   <Eye className="w-4 h-4" />
                   Dwell Time (ms)
                 </label>
-                {/* Bounded to the range that actually works for gaze dwell:
-                    below ~500ms a glance passing over a square can trigger it,
-                    and above ~800ms deliberate selection starts to feel stuck. */}
+                {/* Bounded to the range that works for gaze dwell: below ~500ms
+                    a passing glance can trigger, above ~1000ms selection drags. */}
                 <input
                   type="range"
                   min="500"
-                  max="800"
+                  max="1000"
                   step="50"
                   value={settings.dwellTime}
                   onChange={(e) => handleDwellTimeChange(e.target.value)}
@@ -112,7 +111,7 @@ export default function AccessibilityMenu({
                 <div className="flex justify-between text-xs text-muted-foreground">
                   <span>500ms</span>
                   <span className="font-mono">{settings.dwellTime}ms</span>
-                  <span>800ms</span>
+                  <span>1000ms</span>
                 </div>
               </div>
 

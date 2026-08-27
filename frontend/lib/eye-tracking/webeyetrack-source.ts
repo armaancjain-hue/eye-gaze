@@ -1,4 +1,4 @@
-import type { GazePoint } from './types'
+import type { GazePoint, TrackingIssue } from './types'
 
 /**
  * Thin wrapper around the WebEyeTrack package (`webeyetrack`), which replaces the
@@ -17,8 +17,6 @@ import type { GazePoint } from './types'
  *
  * What this wrapper adds on top of the raw stream:
  *   - normalised point-of-gaze (`normPog`, centred [-0.5..0.5]) -> viewport pixels
- *   - a light EMA so the cursor isn't jittery (WebEyeTrack Kalman-filters already,
- *     so this stays gentle), tunable by the smoothing slider
  *   - deliberate-blink detection from the `gazeState` open/closed stream, reusing
  *     the same timing the old pipeline used
  *   - fps + camera resolution for the status panel
@@ -38,6 +36,7 @@ const BLINK_REFRACTORY_MS = 700
 interface GazeResultLike {
   normPog: number[]
   gazeState: 'open' | 'closed'
+  facialLandmarks?: unknown[]
   timestamp: number
 }
 
@@ -59,12 +58,6 @@ export class WebEyeTrackSource {
   private readonly cb: GazeSourceCallbacks
   private started = false
 
-  // Light output EMA. Higher smoothing strength -> smaller alpha (calmer, a touch
-  // more lag). WebEyeTrack already Kalman-filters upstream, so this stays gentle.
-  private emaAlpha = 0.4
-  private lastX: number | null = null
-  private lastY: number | null = null
-
   // Blink detection over the gazeState stream.
   private closedSince: number | null = null
   private lastBlinkAt = 0
@@ -75,16 +68,18 @@ export class WebEyeTrackSource {
   cameraResolution: { width: number; height: number } | null = null
   /** performance.now() of the most recent gaze result; 0 before the first. */
   lastResultAt = 0
+  /** performance.now() of the most recent open-eye, face-present result. */
+  lastUsableResultAt = 0
+  trackingIssue: TrackingIssue | null = 'model-loading'
 
   constructor(video: HTMLVideoElement, callbacks: GazeSourceCallbacks) {
     this.video = video
     this.cb = callbacks
   }
 
-  /** Set cursor smoothing strength, 0 (responsive) .. 1 (very steady). */
+  /** Kept for API compatibility; smoothing happens after board correction now. */
   setSmoothing(strength: number): void {
-    const s = Math.max(0, Math.min(1, strength))
-    this.emaAlpha = 0.6 - 0.5 * s // 0.6 responsive .. 0.1 steady
+    void strength
   }
 
   /**
@@ -151,12 +146,15 @@ export class WebEyeTrackSource {
     }
 
     // Deliberate-blink detection: a closed stretch of the right length, debounced.
-    const closed = r.gazeState === 'closed'
+    const hasFace = !Array.isArray(r.facialLandmarks) || r.facialLandmarks.length > 0
+    const closed = r.gazeState === 'closed' || !hasFace
     if (closed) {
       if (this.closedSince === null) this.closedSince = now
+      this.trackingIssue = hasFace ? 'low-confidence' : 'no-face'
     } else if (this.closedSince !== null) {
       const closedFor = now - this.closedSince
       this.closedSince = null
+      this.trackingIssue = null
       if (
         closedFor >= BLINK_MIN_MS &&
         closedFor <= BLINK_MAX_MS &&
@@ -170,22 +168,24 @@ export class WebEyeTrackSource {
     // Point mapping. The iris is occluded through a blink, so its estimate is
     // guesswork — hold the cursor still rather than letting it lurch.
     if (!closed && Array.isArray(r.normPog) && r.normPog.length >= 2) {
+      this.lastUsableResultAt = now
       const px = (r.normPog[0] + 0.5) * window.innerWidth
       const py = (r.normPog[1] + 0.5) * window.innerHeight
-      const x = this.lastX === null ? px : this.lastX + this.emaAlpha * (px - this.lastX)
-      const y = this.lastY === null ? py : this.lastY + this.emaAlpha * (py - this.lastY)
-      this.lastX = x
-      this.lastY = y
       // WebEyeTrack exposes no per-frame confidence; report a steady high value,
       // dipping briefly right after a blink when the estimate is least trustworthy.
       const confidence = now - this.lastBlinkAt < 200 ? 0.45 : 0.9
-      this.cb.onPoint({ x, y, confidence })
+      this.cb.onPoint({ x: px, y: py, confidence })
     }
   }
 
   /** How long since the last gaze result; used to flag a lost signal. */
   msSinceLastResult(now = performance.now()): number {
     return this.lastResultAt === 0 ? Number.POSITIVE_INFINITY : now - this.lastResultAt
+  }
+
+  /** How long since the last face-present, open-eye gaze result. */
+  msSinceLastUsableResult(now = performance.now()): number {
+    return this.lastUsableResultAt === 0 ? Number.POSITIVE_INFINITY : now - this.lastUsableResultAt
   }
 
   /** Full teardown — call on page unmount only (see class note on lifetime). */
@@ -199,9 +199,9 @@ export class WebEyeTrackSource {
     this.proxy = null
     this.webcamClient = null
     this.started = false
-    this.lastX = null
-    this.lastY = null
     this.lastResultAt = 0
+    this.lastUsableResultAt = 0
+    this.trackingIssue = 'model-loading'
     this.closedSince = null
   }
 }

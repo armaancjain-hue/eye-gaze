@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import type { BoardPosition } from '@/lib/chess/types'
-import { getBoardGeometry, invalidateBoardGeometry } from './board-mapping'
+import { getBoardGeometry, invalidateBoardGeometry, pointToSquare } from './board-mapping'
 import { SquareStabilizer } from './square-stabilizer'
 import type { GazePoint } from './types'
 
@@ -10,6 +10,7 @@ interface UseGazeInteractionOptions {
   /** Gate the whole thing — pass false when it isn't the player's turn. */
   enabled: boolean
   gazePoint: GazePoint
+  rawGazePoint?: GazePoint
   /** How long (ms) the gaze must hold a square before it activates. */
   dwellTime: number
   /** 0..1 accuracy of the active calibration; feeds the confidence estimate. */
@@ -23,7 +24,11 @@ interface UseGazeInteractionOptions {
 }
 
 export interface GazeInteraction {
+  /** Instantaneous raw WebEyeTrack square before personalized correction. */
+  rawSquare: BoardPosition | null
   /** The stable square the gaze is resolved to, or null. */
+  stableSquare: BoardPosition | null
+  /** Backward-compatible alias for stableSquare. */
   dwellSquare: BoardPosition | null
   /** 0..1 progress toward activating it. */
   dwellProgress: number
@@ -48,6 +53,7 @@ const UPDATE_INTERVAL_MS = 33
 export function useGazeInteraction({
   enabled,
   gazePoint,
+  rawGazePoint,
   dwellTime,
   calibrationScore,
   registerBlink,
@@ -55,6 +61,7 @@ export function useGazeInteraction({
   onBlinkConfirm,
 }: UseGazeInteractionOptions): GazeInteraction {
   const [dwellSquare, setDwellSquare] = useState<BoardPosition | null>(null)
+  const [rawSquare, setRawSquare] = useState<BoardPosition | null>(null)
   const [dwellProgress, setDwellProgress] = useState(0)
   const [confidence, setConfidence] = useState(0)
   const [onBoard, setOnBoard] = useState(false)
@@ -65,6 +72,8 @@ export function useGazeInteraction({
   // Latest values, read inside the loop / blink handler without re-subscribing.
   const gazeRef = useRef(gazePoint)
   gazeRef.current = gazePoint
+  const rawGazeRef = useRef(rawGazePoint ?? gazePoint)
+  rawGazeRef.current = rawGazePoint ?? gazePoint
   const enabledRef = useRef(enabled)
   enabledRef.current = enabled
   const onDwellRef = useRef(onDwell)
@@ -99,6 +108,7 @@ export function useGazeInteraction({
       stabilizer.reset()
       stableSquareRef.current = null
       setDwellSquare(null)
+      setRawSquare(null)
       setDwellProgress(0)
       setConfidence(0)
       setOnBoard(false)
@@ -112,7 +122,9 @@ export function useGazeInteraction({
     const interval = setInterval(() => {
       const now = performance.now()
       const gaze = gazeRef.current
+      const rawGaze = rawGazeRef.current
       const geometry = getBoardGeometry(now)
+      setRawSquare(geometry ? pointToSquare(rawGaze.x, rawGaze.y, geometry)?.square ?? null : null)
       const result = stabilizer.update(now, gaze, geometry, gaze.confidence)
 
       stableSquareRef.current = result.square
@@ -127,5 +139,5 @@ export function useGazeInteraction({
     return () => clearInterval(interval)
   }, [enabled])
 
-  return { dwellSquare, dwellProgress, confidence, onBoard }
+  return { rawSquare, stableSquare: dwellSquare, dwellSquare, dwellProgress, confidence, onBoard }
 }
