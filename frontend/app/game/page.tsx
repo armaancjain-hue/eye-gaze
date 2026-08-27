@@ -9,11 +9,13 @@ import EyeTrackingPanel from '@/components/eye-tracking/EyeTrackingPanel'
 import GazeCursor from '@/components/eye-tracking/GazeCursor'
 import CalibrationOverlay from '@/components/eye-tracking/CalibrationOverlay'
 import MoveHistoryPanel from '@/components/move-history/MoveHistoryPanel'
+import GameOverModal from '@/components/game/GameOverModal'
 import TopNav from '@/components/layout/TopNav'
 import AccessibilityMenu from '@/components/accessibility/AccessibilityMenu'
 import { createInitialGameState } from '@/lib/chess/mock-data'
 import { DEFAULT_ACCESSIBILITY_SETTINGS } from '@/lib/eye-tracking/mock-data'
 import { GameState, BoardPosition, isGameOver } from '@/lib/chess/types'
+import { describeOutcome } from '@/lib/chess/outcome'
 import { AccessibilitySettings } from '@/lib/eye-tracking/types'
 import { makeMove, getPieceAt } from '@/lib/chess/engine'
 import { getBestMove } from '@/lib/chess/stockfish-api'
@@ -40,6 +42,12 @@ export default function GamePage() {
     DEFAULT_ACCESSIBILITY_SETTINGS
   )
   const [settingsOpen, setSettingsOpen] = useState(false)
+  /**
+   * Whether the player has waved the result away to look at the final position.
+   * Reset whenever the game returns to a live status, so the next game's result
+   * announces itself instead of inheriting the last one's dismissal.
+   */
+  const [resultDismissed, setResultDismissed] = useState(false)
   // Collapsible side panels (lg and up); the board expands into the freed space.
   const [leftOpen, setLeftOpen] = useState(true)
   const [rightOpen, setRightOpen] = useState(true)
@@ -65,6 +73,9 @@ export default function GamePage() {
   // Human plays White; the backend Stockfish plays Black.
   const isHumanTurn =
     gameState.whiteToMove && !engineThinking && !isGameOver(gameState.status)
+
+  // The human is White, so the outcome is read from the human's point of view.
+  const outcome = describeOutcome(gameState.status, gameState.whiteToMove, 'white')
 
   // Real eye tracking — WebEyeTrack (webcam + BlazeGaze CNN in a worker).
   const gaze = useGazeTracking()
@@ -139,6 +150,11 @@ export default function GamePage() {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [enterEyeControl, exitEyeControl, isFullscreen, gaze])
+
+  // A live game can never be sitting on a dismissed result.
+  useEffect(() => {
+    if (!isGameOver(gameState.status)) setResultDismissed(false)
+  }, [gameState.status])
 
   // Simulate timer countdown
   useEffect(() => {
@@ -265,12 +281,10 @@ export default function GamePage() {
   const handleNewGame = () => {
     setGameState(createInitialGameState())
     setTimer(600)
+    setResultDismissed(false)
   }
 
-  const handleRestartGame = () => {
-    setGameState(createInitialGameState())
-    setTimer(600)
-  }
+  const handleRestartGame = handleNewGame
 
   const handleSettings = () => {
     setSettingsOpen(true)
@@ -303,6 +317,16 @@ export default function GamePage() {
         onClose={() => setSettingsOpen(false)}
         settings={accessibility}
         onSettingsChange={setAccessibility}
+      />
+
+      {/* End-of-game announcement. Lives inside the fullscreen root so it is
+          still visible while playing with the eyes. */}
+      <GameOverModal
+        outcome={outcome}
+        open={!!outcome && !resultDismissed}
+        onRematch={handleNewGame}
+        onDismiss={() => setResultDismissed(true)}
+        moveCount={gameState.moves.length}
       />
 
       {/* Top Navigation — hidden in gaze/focus mode to hand its height to the board. */}

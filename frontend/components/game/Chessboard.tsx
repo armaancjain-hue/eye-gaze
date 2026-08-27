@@ -3,9 +3,10 @@
 import { useMemo } from 'react'
 import { motion } from 'framer-motion'
 import { GameState, BoardPosition } from '@/lib/chess/types'
-import { BOARD_SIZE, COLUMN_LABELS } from '@/lib/chess/constants'
+import { BOARD_COLORS, BOARD_SIZE, COLUMN_LABELS } from '@/lib/chess/constants'
 import { getLegalMoves } from '@/lib/chess/engine'
 import type { GameStatus } from '@/lib/chess/types'
+import { describeOutcome } from '@/lib/chess/outcome'
 import {
   DEFAULT_ORIENTATION,
   toLogical,
@@ -50,26 +51,18 @@ interface ChessboardProps {
  */
 const MAX_BOARD_PX = 1400
 
-/** Statuses that end the game, and how each reads to a player. */
-const STATUS_TEXT: Partial<Record<GameStatus, string>> = {
+/** Non-terminal statuses worth calling out under the board. */
+const CHECK_TEXT: Partial<Record<GameStatus, string>> = {
   white_check: 'White is in check',
   black_check: 'Black is in check',
-  checkmate: 'Checkmate',
-  stalemate: 'Stalemate — draw',
-  draw_repetition: 'Draw — threefold repetition',
-  draw_fifty_move: 'Draw — fifty-move rule',
-  draw_insufficient: 'Draw — insufficient material',
 }
 
-const STATUS_CLASS: Partial<Record<GameStatus, string>> = {
-  white_check: 'text-accent font-semibold',
-  black_check: 'text-accent font-semibold',
-  checkmate: 'text-accent font-semibold',
-  stalemate: 'text-muted-foreground font-semibold',
-  draw_repetition: 'text-muted-foreground font-semibold',
-  draw_fifty_move: 'text-muted-foreground font-semibold',
-  draw_insufficient: 'text-muted-foreground font-semibold',
-}
+/** How each end-of-game tone is coloured in the status strip. */
+const TONE_CLASS = {
+  win: 'text-emerald-300 font-semibold',
+  loss: 'text-red-300 font-semibold',
+  draw: 'text-amber-200 font-semibold',
+} as const
 
 /** Positions where the side to move is under check, so the king is highlighted. */
 const IN_CHECK = new Set<GameStatus>(['white_check', 'black_check', 'checkmate'])
@@ -98,6 +91,10 @@ export default function Chessboard({
   // to an assumption about how much chrome surrounds it.
   const { ref: areaRef, size } = useMaxSquareSize(MAX_BOARD_PX, `${layoutKey}:${focusMode}`)
 
+  // The strip says who actually won, not just that a checkmate happened — the
+  // same reading the end-of-game dialog gives, so the two never disagree.
+  const outcome = describeOutcome(gameState.status, gameState.whiteToMove, 'white')
+
   return (
     <div className="flex flex-col w-full h-full min-w-0 min-h-0">
       {/* Measured area. The board inside is taken out of flow, so it cannot
@@ -123,11 +120,15 @@ export default function Chessboard({
             animate={{ opacity: 1 }}
             transition={{ duration: 0.4 }}
             className={`overflow-hidden bg-background ${
-              focusMode ? '' : 'rounded-lg border-2 border-primary/30 shadow-2xl'
+              focusMode ? '' : 'rounded-lg border-2 shadow-2xl'
             }`}
             // Zero until the first measurement lands; rendering at a provisional
             // size first would move every square under the player's gaze.
-            style={{ width: size || undefined, visibility: size ? 'visible' : 'hidden' }}
+            style={{
+              width: size || undefined,
+              visibility: size ? 'visible' : 'hidden',
+              borderColor: focusMode ? undefined : BOARD_COLORS.edge,
+            }}
           >
             <div
               className="grid"
@@ -196,11 +197,15 @@ export default function Chessboard({
 
       {/* Status sits outside the measured area, so its height is subtracted from
           the board's budget automatically instead of being guessed at. */}
-      <div className="h-6 shrink-0 flex items-center justify-center gap-2 text-sm">
-        {STATUS_TEXT[gameState.status] ? (
-          <span className={STATUS_CLASS[gameState.status] ?? 'text-muted-foreground'}>
-            {STATUS_TEXT[gameState.status]}
-          </span>
+      <div
+        className="h-6 shrink-0 flex items-center justify-center gap-2 text-sm"
+        role="status"
+        aria-live="polite"
+      >
+        {outcome ? (
+          <span className={TONE_CLASS[outcome.tone]}>{outcome.headline}</span>
+        ) : CHECK_TEXT[gameState.status] ? (
+          <span className="text-accent font-semibold">{CHECK_TEXT[gameState.status]}</span>
         ) : isThinking ? (
           <span className="text-primary font-semibold animate-pulse">
             Stockfish is thinking…

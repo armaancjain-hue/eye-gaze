@@ -2,7 +2,8 @@
 
 import { motion } from 'framer-motion'
 import { Piece } from '@/lib/chess/types'
-import { PIECE_UNICODE } from '@/lib/chess/constants'
+import { BOARD_COLORS } from '@/lib/chess/constants'
+import ChessPiece from './ChessPiece'
 
 interface SquareProps {
   row: number
@@ -39,8 +40,11 @@ export default function Square({
   fileLabel,
   rankLabel,
 }: SquareProps) {
-  const baseColor = isLight ? 'bg-card' : 'bg-muted'
-  const hoverColor = isLight ? 'hover:bg-primary/20' : 'hover:bg-primary/30'
+  // Square colours come from the board palette rather than the app's theme
+  // tokens: the board wants its own green/black identity, and it must not drift
+  // when the surrounding UI's greys are retuned.
+  const background = isLight ? BOARD_COLORS.light : BOARD_COLORS.dark
+  const labelColor = isLight ? BOARD_COLORS.labelOnLight : BOARD_COLORS.labelOnDark
 
   return (
     <motion.button
@@ -48,19 +52,33 @@ export default function Square({
       whileTap={{ scale: 0.98 }}
       onClick={onClick}
       data-square={`${row}-${col}`}
-      style={{ containerType: 'size' }}
+      style={{ containerType: 'size', backgroundColor: background }}
       className={`
         relative w-full aspect-square flex items-center justify-center
-        ${baseColor} ${hoverColor}
         transition-all duration-200
         border border-transparent
-        ${isSelected ? 'border-2 border-primary ring-2 ring-primary/50' : ''}
-        ${isLastMove ? 'bg-accent/20' : ''}
-        ${isCheck ? 'bg-destructive/30 ring-2 ring-destructive' : ''}
-        ${isLegalMove ? 'ring-2 ring-primary/40' : ''}
-        cursor-pointer
+        ${isSelected ? 'border-2 border-primary ring-2 ring-primary/60 ring-inset' : ''}
+        ${isLegalMove ? 'ring-2 ring-primary/40 ring-inset' : ''}
+        cursor-pointer group
       `}
     >
+      {/* Square washes are painted as overlays instead of swapping the base
+          colour, so "last move" and "in check" look the same on a light square
+          as on a dark one. */}
+      {isLastMove && (
+        <div
+          className="absolute inset-0 pointer-events-none"
+          style={{ backgroundColor: BOARD_COLORS.lastMove }}
+        />
+      )}
+      {isCheck && (
+        <div
+          className="absolute inset-0 pointer-events-none ring-2 ring-inset ring-red-500"
+          style={{ backgroundColor: BOARD_COLORS.check }}
+        />
+      )}
+      <div className="absolute inset-0 pointer-events-none bg-white/0 group-hover:bg-white/10 transition-colors" />
+
       {/* Coordinates are drawn inside the edge squares rather than in gutters
           around the board. The gutters cost ~36px of layout in both axes, and on
           a height-constrained screen that is the difference between the board
@@ -68,8 +86,8 @@ export default function Square({
       {rankLabel && (
         <span
           aria-hidden
-          className="absolute left-[4cqmin] top-[2cqmin] font-semibold text-muted-foreground/70 select-none pointer-events-none"
-          style={{ fontSize: '13cqmin', lineHeight: 1 }}
+          className="absolute left-[4cqmin] top-[2cqmin] font-bold select-none pointer-events-none"
+          style={{ fontSize: '13cqmin', lineHeight: 1, color: labelColor }}
         >
           {rankLabel}
         </span>
@@ -77,8 +95,8 @@ export default function Square({
       {fileLabel && (
         <span
           aria-hidden
-          className="absolute right-[4cqmin] bottom-[2cqmin] font-semibold text-muted-foreground/70 select-none pointer-events-none uppercase"
-          style={{ fontSize: '13cqmin', lineHeight: 1 }}
+          className="absolute right-[4cqmin] bottom-[2cqmin] font-bold select-none pointer-events-none uppercase"
+          style={{ fontSize: '13cqmin', lineHeight: 1, color: labelColor }}
         >
           {fileLabel}
         </span>
@@ -91,7 +109,7 @@ export default function Square({
         <div
           className="absolute inset-0 pointer-events-none rounded-sm"
           style={{
-            background: `conic-gradient(rgba(168,85,247,${0.2 + 0.45 * Math.max(0, Math.min(1, dwellConfidence))}) ${dwellProgress * 360}deg, transparent 0deg)`,
+            background: `conic-gradient(rgba(168,85,247,${0.25 + 0.5 * Math.max(0, Math.min(1, dwellConfidence))}) ${dwellProgress * 360}deg, transparent 0deg)`,
             WebkitMaskImage: 'radial-gradient(circle, transparent 62%, black 64%)',
             maskImage: 'radial-gradient(circle, transparent 62%, black 64%)',
           }}
@@ -103,13 +121,16 @@ export default function Square({
         <motion.div
           initial={{ scale: 0 }}
           animate={{ scale: 1 }}
-          className={`absolute ${piece ? 'w-4 h-4 ring-2 ring-primary' : 'w-2 h-2 bg-primary/60 rounded-full'}`}
+          className={
+            piece
+              ? 'absolute inset-[8cqmin] rounded-full border-[4cqmin] border-primary/55 pointer-events-none'
+              : 'absolute w-[26cqmin] h-[26cqmin] rounded-full bg-primary/60 pointer-events-none'
+          }
         />
       )}
 
-      {/* Piece. Both colours use the same solid glyph; the colour and a contrasting
-          outline distinguish White (light) from Black (dark) and keep each side
-          legible on the dark board. */}
+      {/* Piece. Each side is a filled silhouette outlined in the opposite
+          colour, so shape carries the identity and colour carries the side. */}
       {piece && (
         <motion.div
           initial={{ scale: 0, opacity: 0 }}
@@ -119,22 +140,9 @@ export default function Square({
             stiffness: 260,
             damping: 20,
           }}
-          style={{
-            fontSize: '70cqmin',
-            lineHeight: 1,
-            // White = bright fill with a thin dark rim; Black = dark fill with a
-            // thin light rim so it stays legible on the dark board without a glow
-            // that would make it read as white.
-            color: piece.color === 'white' ? '#f4f4f5' : '#161619',
-            WebkitTextStroke:
-              piece.color === 'white'
-                ? '0.6px rgba(0,0,0,0.45)'
-                : '1.2px rgba(226,226,232,0.92)',
-            textShadow: '0 1px 2px rgba(0,0,0,0.55)',
-          }}
-          className="cursor-move select-none"
+          className="relative w-[84cqmin] h-[84cqmin] select-none pointer-events-none"
         >
-          {PIECE_UNICODE[`${piece.color}_${piece.type}`]}
+          <ChessPiece type={piece.type} color={piece.color} className="w-full h-full" />
         </motion.div>
       )}
     </motion.button>
