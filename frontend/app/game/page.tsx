@@ -1,13 +1,13 @@
 'use client'
 
-import { useState, useEffect, useRef } from 'react'
-import { useRouter } from 'next/navigation'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { motion } from 'framer-motion'
-import { ChevronLeft, ChevronRight, Maximize2, Minimize2, FlipVertical2 } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Maximize2, Minimize2, FlipVertical2, AlertCircle } from 'lucide-react'
 import Chessboard from '@/components/game/Chessboard'
 import LeftSidebar from '@/components/layout/LeftSidebar'
 import EyeTrackingPanel from '@/components/eye-tracking/EyeTrackingPanel'
 import GazeCursor from '@/components/eye-tracking/GazeCursor'
+import CalibrationOverlay from '@/components/eye-tracking/CalibrationOverlay'
 import MoveHistoryPanel from '@/components/move-history/MoveHistoryPanel'
 import TopNav from '@/components/layout/TopNav'
 import AccessibilityMenu from '@/components/accessibility/AccessibilityMenu'
@@ -20,11 +20,18 @@ import { getBestMove } from '@/lib/chess/stockfish-api'
 import { applyUciMove } from '@/lib/chess/apply-move'
 import { useGazeTracking } from '@/lib/eye-tracking/useGazeTracking'
 import { useGazeInteraction } from '@/lib/eye-tracking/useGazeInteraction'
-import { toAlgebraic } from '@/lib/eye-tracking/board-mapping'
+import { toAlgebraic, getBoardGeometry, invalidateBoardGeometry } from '@/lib/eye-tracking/board-mapping'
 import { DEFAULT_ORIENTATION, type BoardOrientation } from '@/lib/chess/orientation'
 
+/**
+ * Smallest square (CSS px) at which gaze selection is allowed. Gaze error is
+ * roughly fixed in pixels, so below this the cursor deadband and landmark noise
+ * start to span more than a square. Fullscreen on any normal display clears it
+ * comfortably (~90-130px), which is exactly why gaze is gated to fullscreen.
+ */
+const MIN_GAZE_SQUARE_PX = 80
+
 export default function GamePage() {
-  const router = useRouter()
   const [gameState, setGameState] = useState<GameState>(createInitialGameState())
   const [timer, setTimer] = useState(600)
   const [difficulty, setDifficulty] = useState('Intermediate')
@@ -37,18 +44,21 @@ export default function GamePage() {
   const [leftOpen, setLeftOpen] = useState(true)
   const [rightOpen, setRightOpen] = useState(true)
   /**
-   * Focus mode hides the header and both sidebars so the board gets the whole
-   * viewport. On a laptop that is the difference between ~70px and ~115px
-   * squares — and while a bigger board doesn't shrink the *angular* gaze error,
-   * it does give real headroom over the error sources fixed in pixels.
+   * Eye control runs only in true fullscreen: it strips all chrome so the board
+   * fills the screen (guaranteeing squares well above {@link MIN_GAZE_SQUARE_PX}),
+   * and it is the deliberate "I'm playing with my eyes now" gesture. `focusMode`
+   * tracks the fullscreen state so the existing chrome-hiding layout follows it.
    */
-  const [focusMode, setFocusMode] = useState(false)
+  const [isFullscreen, setIsFullscreen] = useState(false)
+  const focusMode = isFullscreen
+  const [showCalibration, setShowCalibration] = useState(false)
+  /** Board square edge in px, polled while in gaze mode for the size gate. */
+  const [squareSize, setSquareSize] = useState(0)
+  const rootRef = useRef<HTMLDivElement | null>(null)
   /**
    * Which side is drawn at the top. Defaults to white — the player's own pieces
    * — because that is the half of the board they look at most to pick a piece,
-   * and the upper half of the screen is where gaze tracking is most reliable:
-   * looking down narrows the eye aperture and the lid starts to occlude the
-   * iris, which is exactly the landmark the whole estimate rests on.
+   * and the upper half of the screen is where gaze tracking is most reliable.
    */
   const [orientation, setOrientation] = useState<BoardOrientation>(DEFAULT_ORIENTATION)
 
@@ -56,7 +66,7 @@ export default function GamePage() {
   const isHumanTurn =
     gameState.whiteToMove && !engineThinking && !isGameOver(gameState.status)
 
-  // Real eye tracking (webcam + MediaPipe face mesh).
+  // Real eye tracking — WebEyeTrack (webcam + BlazeGaze CNN in a worker).
   const gaze = useGazeTracking()
 
   const eyeTrackingState = {
@@ -64,26 +74,71 @@ export default function GamePage() {
     calibrationProgress: gaze.hasCalibration ? 100 : 0,
   }
 
-  // F toggles focus mode, Escape leaves it. Reaching a button is exactly the
-  // interaction a gaze user finds hardest, so this stays keyboard-first.
+  // --- Fullscreen eye-control lifecycle ---------------------------------------
+
+  const enterEyeControl = useCallback(() => {
+    const el = rootRef.current
+    // requestFullscreen must run inside the user gesture, before any await.
+    if (el && !document.fullscreenElement) {
+      el.requestFullscreen().catch(() => {})
+    }
+    gaze.start()
+    if (!gaze.hasCalibration) setShowCalibration(true)
+  }, [gaze])
+
+  const exitEyeControl = useCallback(() => {
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => {})
+  }, [])
+
+  // Keep our flags in step with the browser's fullscreen state (Esc, F11, etc.).
+  useEffect(() => {
+    const onFs = () => {
+      const fs = !!document.fullscreenElement && document.fullscreenElement === rootRef.current
+      setIsFullscreen(fs)
+      if (!fs) setShowCalibration(false)
+      invalidateBoardGeometry()
+    }
+    document.addEventListener('fullscreenchange', onFs)
+    return () => document.removeEventListener('fullscreenchange', onFs)
+  }, [])
+
+  // Poll the board's square size while in gaze mode, for the size gate + nudge.
+  useEffect(() => {
+    if (!isFullscreen) {
+      setSquareSize(0)
+      return
+    }
+    const id = setInterval(() => {
+      const g = getBoardGeometry()
+      setSquareSize(g?.squareSize ?? 0)
+    }, 300)
+    return () => clearInterval(id)
+  }, [isFullscreen])
+
+  // F toggles fullscreen eye control, C recalibrates, V flips the board. Reaching
+  // a button is exactly the interaction a gaze user finds hardest, so the view
+  // controls stay keyboard-first.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null
-      // Never steal a keystroke that is being typed into something.
       if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return
       if (e.key === 'f' || e.key === 'F') {
         e.preventDefault()
-        setFocusMode((v) => !v)
+        if (document.fullscreenElement) exitEyeControl()
+        else enterEyeControl()
+      } else if (e.key === 'c' || e.key === 'C') {
+        if (isFullscreen) {
+          gaze.resetCalibration()
+          setShowCalibration(true)
+        }
       } else if (e.key === 'v' || e.key === 'V') {
         e.preventDefault()
         setOrientation((o) => (o === 'white-top' ? 'white-bottom' : 'white-top'))
-      } else if (e.key === 'Escape') {
-        setFocusMode(false)
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [])
+  }, [enterEyeControl, exitEyeControl, isFullscreen, gaze])
 
   // Simulate timer countdown
   useEffect(() => {
@@ -94,15 +149,12 @@ export default function GamePage() {
     return () => clearInterval(interval)
   }, [])
 
-  // Push the smoothing setting into the tracker whenever it changes (and once the
-  // tracker is live). Higher setting = steadier, less jittery cursor.
+  // Push the smoothing setting into the tracker whenever it changes.
   useEffect(() => {
     if (gaze.isReady) gaze.setSmoothing(accessibility.smoothing / 100)
   }, [gaze.isReady, accessibility.smoothing, gaze.setSmoothing])
 
   // When it becomes Black's turn, ask the backend Stockfish for its move.
-  // Keyed on move count so each position is requested exactly once (also guards
-  // against React's dev double-invoke).
   const requestedForMoveCount = useRef(-1)
   useEffect(() => {
     if (gameState.whiteToMove) return
@@ -117,16 +169,10 @@ export default function GamePage() {
       .then((result) => {
         if (cancelled) return
         if (!result) {
-          // Backend unreachable / error — hand the turn back to the player.
           setEngineThinking(false)
           return
         }
         setGameState((prev) => {
-          // The engine reporting no move means the position is terminal — and
-          // our own rules already know exactly which kind of terminal it is, so
-          // there is nothing to overwrite. The backend's status was previously
-          // trusted over the local one only because the local rules could not
-          // detect mate or stalemate at all.
           if (!result.move) return prev
           return applyUciMove(prev, result.move) ?? prev
         })
@@ -148,15 +194,12 @@ export default function GamePage() {
       const piece = getPieceAt(prev.board, pos.row, pos.col)
       const myColor = prev.whiteToMove ? 'white' : 'black'
 
-      // Dwelling on the already-selected square deselects it.
       if (prev.selectedSquare?.row === pos.row && prev.selectedSquare?.col === pos.col) {
         return { ...prev, selectedSquare: null }
       }
-      // Dwelling on one of your pieces selects it.
       if (piece && piece.color === myColor) {
         return { ...prev, selectedSquare: pos }
       }
-      // Dwelling elsewhere with nothing selected does nothing.
       return prev
     })
   }
@@ -170,23 +213,25 @@ export default function GamePage() {
     })
   }
 
-  // Gaze control requires a fitted calibration. Without one the only mapping
-  // available is the raw, un-personalised one, which cannot tell 64 squares
-  // apart — so squares stay mouse-only until the player calibrates, rather than
-  // selecting the wrong piece and looking broken.
-  const gazeControlReady = gaze.isReady && gaze.hasCalibration
+  // Gaze control requires: the tracker up, enough calibration collected, real
+  // fullscreen, a board large enough for square-accurate gaze, and no calibration
+  // overlay in progress. Any of these missing leaves the game mouse-only.
+  const boardBigEnough = squareSize >= MIN_GAZE_SQUARE_PX
+  const gazeControlReady =
+    gaze.isReady && gaze.hasCalibration && isFullscreen && boardBigEnough && !showCalibration
 
   const { dwellSquare, dwellProgress, confidence: dwellConfidence } = useGazeInteraction({
     enabled: gazeControlReady && isHumanTurn,
     gazePoint: gaze.state.gazePoint,
     dwellTime: accessibility.dwellTime,
-    calibrationScore: gaze.calibrationScore,
+    calibrationScore: gaze.hasCalibration ? 0.85 : 0,
     registerBlink: gaze.onBlink,
     onDwell: handleGazeDwell,
     onBlinkConfirm: handleBlinkConfirm,
   })
 
-  // Mouse fallback: click to select, click again to move.
+  // Mouse fallback: click to select, click again to move. (Board clicks are also
+  // look-aligned calibration for WebEyeTrack, so they keep refining the model.)
   const handleSquareClick = (row: number, col: number) => {
     if (!isHumanTurn) return
     setGameState((prev) => {
@@ -227,19 +272,31 @@ export default function GamePage() {
     setTimer(600)
   }
 
-  const handleCalibration = () => {
-    router.push('/calibration')
-  }
-
   const handleSettings = () => {
     setSettingsOpen(true)
   }
 
   return (
-    // On desktop the game is locked to the viewport height (lg:h-screen +
-    // overflow-hidden) so the board can claim the full height instead of being
-    // pushed below the fold by a tall sidebar. Mobile keeps normal page scroll.
-    <div className="min-h-screen lg:h-screen lg:overflow-hidden bg-background flex flex-col">
+    <div
+      ref={rootRef}
+      className="min-h-screen lg:h-screen lg:overflow-hidden bg-background flex flex-col"
+    >
+      {/* Hidden webcam element WebEyeTrack drives by id. Always mounted while the
+          page is (kept renderable, not display:none, so frame capture never
+          breaks); shown as a small corner preview in gaze mode. */}
+      <video
+        ref={gaze.videoRef}
+        id="webcam"
+        autoPlay
+        playsInline
+        muted
+        className={
+          isFullscreen
+            ? 'fixed bottom-3 left-3 z-[65] w-40 h-28 object-cover -scale-x-100 rounded-lg border border-border opacity-80 pointer-events-none'
+            : 'fixed w-px h-px opacity-0 pointer-events-none -z-10'
+        }
+      />
+
       {/* Accessibility Settings Menu */}
       <AccessibilityMenu
         isOpen={settingsOpen}
@@ -248,22 +305,38 @@ export default function GamePage() {
         onSettingsChange={setAccessibility}
       />
 
-      {/* Top Navigation — hidden in focus mode to hand its height to the board. */}
+      {/* Top Navigation — hidden in gaze/focus mode to hand its height to the board. */}
       {!focusMode && <TopNav />}
 
-      {/* Full-screen gaze cursor so the player can see (and correct) where the
-          tracker thinks they're looking, with a ring that fills as a dwell lands. */}
+      {/* Full-screen gaze cursor. Only meaningful while gaze is actually driving,
+          i.e. in fullscreen eye control. */}
       <GazeCursor
         gazePoint={gaze.state.gazePoint}
-        active={gaze.isReady && gaze.state.status === 'active'}
+        active={isFullscreen && gaze.isReady && gaze.state.status === 'active'}
         dwellProgress={dwellProgress}
         dwelling={!!dwellSquare}
         largeCursor={accessibility.largeCursor}
         reducedMotion={accessibility.reducedMotion}
       />
 
-      {/* Board flip. Sits beside the focus toggle so both view controls are in
-          the same place, and is reachable without the keyboard. */}
+      {/* Calibration overlay (only in gaze mode, until calibrated). */}
+      {isFullscreen && showCalibration && (
+        <CalibrationOverlay
+          onNoteSample={gaze.noteCalibrationSample}
+          onComplete={() => setShowCalibration(false)}
+          onCancel={() => setShowCalibration(false)}
+        />
+      )}
+
+      {/* "Board too small for gaze" nudge — rare, since fullscreen clears the bar. */}
+      {isFullscreen && gaze.isReady && !showCalibration && !boardBigEnough && (
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[66] flex items-center gap-2 rounded-lg border border-yellow-400/40 bg-card/90 px-3 py-2 text-xs text-yellow-400 shadow-lg">
+          <AlertCircle className="w-4 h-4 shrink-0" />
+          <span>Enlarge the window — squares must be ≥{MIN_GAZE_SQUARE_PX}px for eye control.</span>
+        </div>
+      )}
+
+      {/* Board flip. */}
       <button
         onClick={() =>
           setOrientation((o) => (o === 'white-top' ? 'white-bottom' : 'white-top'))
@@ -279,16 +352,17 @@ export default function GamePage() {
         <FlipVertical2 className="w-4 h-4" />
       </button>
 
-      {/* Focus-mode toggle. Deliberately small and out of the board's way, but
-          always present so there is a way back without the keyboard. */}
+      {/* Eye-control / fullscreen toggle. */}
       <button
-        onClick={() => setFocusMode((v) => !v)}
-        title={focusMode ? 'Exit focus mode (Esc)' : 'Focus mode — bigger board (F)'}
-        aria-label={focusMode ? 'Exit focus mode' : 'Enter focus mode'}
-        aria-pressed={focusMode}
+        onClick={() => (document.fullscreenElement ? exitEyeControl() : enterEyeControl())}
+        title={
+          isFullscreen ? 'Exit eye control (Esc)' : 'Eye control — fullscreen, gaze on (F)'
+        }
+        aria-label={isFullscreen ? 'Exit eye control' : 'Enter eye control'}
+        aria-pressed={isFullscreen}
         className="fixed bottom-3 right-3 z-50 p-2 rounded-lg border border-border bg-card/80 backdrop-blur text-muted-foreground hover:text-foreground hover:bg-card transition-colors"
       >
-        {focusMode ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
+        {isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
       </button>
 
       {/* Main Game Area */}
@@ -331,8 +405,7 @@ export default function GamePage() {
           </button>
         )}
 
-        {/* Center - Chessboard. Opacity-only entrance so the board's rendered
-            size never depends on a scale animation finishing. */}
+        {/* Center - Chessboard. */}
         <motion.div
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
@@ -365,22 +438,16 @@ export default function GamePage() {
                 <ChevronRight className="w-4 h-4" />
               </button>
             </div>
-            {/* Tracking panel keeps its natural height; move history takes the
-                remaining space and scrolls internally so nothing stretches the
-                row past the viewport. */}
             <div className="shrink-0">
               <EyeTrackingPanel
                 eyeTrackingState={eyeTrackingState}
-                onCalibrationClick={handleCalibration}
-                videoRef={gaze.videoRef}
+                onStartEyeControl={enterEyeControl}
                 isReady={gaze.isReady}
                 error={gaze.error}
-                onEnableCamera={gaze.start}
-                calibrationQuality={gaze.calibrationQuality}
+                hasCalibration={gaze.hasCalibration}
+                calibrationSampleCount={gaze.calibrationSampleCount}
                 targetSquare={dwellSquare ? toAlgebraic(dwellSquare) : null}
                 targetConfidence={dwellConfidence}
-                driftWarning={gaze.driftWarning}
-                boardResized={gaze.boardResized}
                 cameraResolution={gaze.cameraResolution}
                 fps={gaze.fps}
               />
@@ -417,16 +484,13 @@ export default function GamePage() {
         <div className="grid grid-cols-2 gap-4">
           <EyeTrackingPanel
             eyeTrackingState={eyeTrackingState}
-            onCalibrationClick={handleCalibration}
-            videoRef={gaze.videoRef}
+            onStartEyeControl={enterEyeControl}
             isReady={gaze.isReady}
             error={gaze.error}
-            onEnableCamera={gaze.start}
-            calibrationQuality={gaze.calibrationQuality}
+            hasCalibration={gaze.hasCalibration}
+            calibrationSampleCount={gaze.calibrationSampleCount}
             targetSquare={dwellSquare ? toAlgebraic(dwellSquare) : null}
             targetConfidence={dwellConfidence}
-            driftWarning={gaze.driftWarning}
-            boardResized={gaze.boardResized}
             cameraResolution={gaze.cameraResolution}
             fps={gaze.fps}
           />

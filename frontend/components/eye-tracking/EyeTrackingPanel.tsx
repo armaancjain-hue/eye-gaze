@@ -1,55 +1,41 @@
 'use client'
 
-import { RefObject } from 'react'
 import { motion } from 'framer-motion'
-import { Eye, AlertCircle, CheckCircle2, Video } from 'lucide-react'
+import { Eye, AlertCircle, CheckCircle2, Maximize2 } from 'lucide-react'
 import { EyeTrackingState } from '@/lib/eye-tracking/types'
-import type { CalibrationQuality } from '@/lib/eye-tracking/calibration'
-import GazeRing from './GazeRing'
-import WebcamPreview from './WebcamPreview'
 
 interface EyeTrackingPanelProps {
   eyeTrackingState: EyeTrackingState
-  onCalibrationClick: () => void
-  videoRef: RefObject<HTMLVideoElement | null>
+  /** Enter fullscreen eye control (starts the tracker, shows calibration if needed). */
+  onStartEyeControl: () => void
   isReady: boolean
   error: string | null
-  onEnableCamera: () => void
-  /** Held-out accuracy of the active calibration, or null if uncalibrated. */
-  calibrationQuality?: CalibrationQuality | null
+  /** True once enough look-aligned calibration clicks have been collected. */
+  hasCalibration: boolean
+  /** How many calibration samples have been collected this session. */
+  calibrationSampleCount: number
   /** The square the gaze currently resolves to, in algebraic notation. */
   targetSquare?: string | null
   /** 0..1 confidence in that square. */
   targetConfidence?: number
-  /** True while the player has drifted out of the pose they calibrated at. */
-  driftWarning?: boolean
-  /** True when the board has been resized enough that the fit no longer holds. */
-  boardResized?: boolean
   /** Resolution the webcam actually negotiated. */
   cameraResolution?: { width: number; height: number } | null
-  /** Detection throughput, frames per second. */
+  /** Detection throughput, gaze results per second. */
   fps?: number
 }
 
 export default function EyeTrackingPanel({
   eyeTrackingState,
-  onCalibrationClick,
-  videoRef,
+  onStartEyeControl,
   isReady,
   error,
-  onEnableCamera,
-  calibrationQuality = null,
+  hasCalibration,
+  calibrationSampleCount,
   targetSquare = null,
   targetConfidence = 0,
-  driftWarning = false,
-  boardResized = false,
   cameraResolution = null,
   fps = 0,
 }: EyeTrackingPanelProps) {
-  // Iris-landmark precision is bounded by how many pixels land on the eye, so a
-  // camera that quietly capped below 720p puts a floor under achievable accuracy
-  // that no amount of recalibration can lift.
-  const lowResolution = !!cameraResolution && cameraResolution.width < 1280
   const isActive = eyeTrackingState.status === 'active'
   const statusColor = isActive ? 'text-green-400' : 'text-yellow-400'
   const statusBgColor = isActive ? 'bg-green-400/10' : 'bg-yellow-400/10'
@@ -76,24 +62,27 @@ export default function EyeTrackingPanel({
         <h3 className="font-semibold text-foreground">Eye Tracking</h3>
       </div>
 
-      {/* Webcam Preview */}
-      <div className="relative rounded-lg overflow-hidden border border-border bg-background">
-        <WebcamPreview ref={videoRef} active={isReady} />
-        {isReady && <GazeRing gazePoint={eyeTrackingState.gazePoint} />}
-      </div>
+      {/* Powered-by note — this is WebEyeTrack now, calibrated by looking + clicking. */}
+      <p className="text-xs text-muted-foreground">
+        Gaze runs only in <span className="text-foreground font-medium">fullscreen</span>,
+        where the board is large enough to select squares by eye.
+      </p>
 
-      {/* Enable camera / error */}
-      {!isReady && (
-        <motion.button
-          onClick={onEnableCamera}
-          whileHover={{ scale: 1.02 }}
-          whileTap={{ scale: 0.98 }}
-          className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-primary hover:bg-accent text-primary-foreground text-sm font-medium transition-colors"
-        >
-          <Video className="w-4 h-4" />
-          Enable Camera
-        </motion.button>
-      )}
+      {/* Enter eye control */}
+      <motion.button
+        onClick={onStartEyeControl}
+        whileHover={{ scale: 1.02 }}
+        whileTap={{ scale: 0.98 }}
+        className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-primary hover:bg-accent text-primary-foreground text-sm font-medium transition-colors"
+      >
+        <Maximize2 className="w-4 h-4" />
+        {isReady ? (hasCalibration ? 'Enter eye control' : 'Calibrate in fullscreen') : 'Start eye control'}
+      </motion.button>
+      <p className="text-[11px] text-muted-foreground/80">
+        Press <kbd className="px-1 py-0.5 rounded border border-border bg-muted font-mono">F</kbd> to
+        toggle, <kbd className="px-1 py-0.5 rounded border border-border bg-muted font-mono">C</kbd> to
+        recalibrate. Video never leaves this device.
+      </p>
       {error && (
         <p className="text-xs text-red-400 flex items-start gap-1">
           <AlertCircle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
@@ -118,9 +107,7 @@ export default function EyeTrackingPanel({
       {/* Confidence Meter */}
       <div className="space-y-2">
         <div className="flex items-center justify-between">
-          <p className="text-xs font-semibold text-muted-foreground uppercase">
-            Confidence
-          </p>
+          <p className="text-xs font-semibold text-muted-foreground uppercase">Confidence</p>
           <motion.p
             key={eyeTrackingState.gazePoint.confidence}
             initial={{ scale: 1.1 }}
@@ -140,12 +127,9 @@ export default function EyeTrackingPanel({
         </div>
       </div>
 
-      {/* Target square — the actual output of the pipeline, shown so the player
-          can see which square is being voted for before it commits. */}
+      {/* Target square — the actual output of the pipeline. */}
       <div className="space-y-2">
-        <p className="text-xs font-semibold text-muted-foreground uppercase">
-          Target square
-        </p>
+        <p className="text-xs font-semibold text-muted-foreground uppercase">Target square</p>
         <div className="flex items-center justify-between gap-2">
           <span className="text-2xl font-bold font-mono text-foreground tabular-nums">
             {targetSquare ?? '—'}
@@ -156,58 +140,18 @@ export default function EyeTrackingPanel({
         </div>
       </div>
 
-      {/* Calibration state. The error is reported in board squares because that
-          is the unit that decides whether a square can be picked at all. */}
+      {/* Calibration state */}
       <div className="space-y-2">
-        <p className="text-xs font-semibold text-muted-foreground uppercase">
-          Calibration
-        </p>
-        <div className="w-full h-1.5 bg-muted rounded-full overflow-hidden">
-          <motion.div
-            initial={false}
-            animate={{ width: `${eyeTrackingState.calibrationProgress}%` }}
-            transition={{ duration: 0.5 }}
-            className="h-full bg-accent rounded-full"
-          />
-        </div>
-        {boardResized && (
-          <p className="text-xs text-yellow-400 flex items-start gap-1">
-            <AlertCircle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
-            <span>
-              The board is a different size than when you calibrated. Recalibrate
-              to get the accuracy back.
-            </span>
-          </p>
-        )}
-        {calibrationQuality && !calibrationQuality.headCompensation && (
-          <p className="text-xs text-yellow-400 flex items-start gap-1">
-            <AlertCircle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
-            <span>
-              No head compensation — tracking will drift if you move. Recalibrate
-              and shift a little when prompted.
-            </span>
-          </p>
-        )}
-        {driftWarning && (
-          <p className="text-xs text-yellow-400 flex items-start gap-1">
-            <AlertCircle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
-            <span>
-              You’ve moved since calibrating — sit back the way you were, or
-              recalibrate.
-            </span>
-          </p>
-        )}
-        {calibrationQuality ? (
+        <p className="text-xs font-semibold text-muted-foreground uppercase">Calibration</p>
+        {hasCalibration ? (
           <p className="text-xs text-muted-foreground">
-            Typical error{' '}
-            <span className="font-semibold text-foreground">
-              {calibrationQuality.medianErrorSquares.toFixed(2)} squares
-            </span>{' '}
-            · {calibrationQuality.pointCount} points
+            <span className="font-semibold text-green-400">Calibrated</span> ·{' '}
+            {calibrationSampleCount} samples. It keeps improving as you look-and-click.
           </p>
         ) : (
           <p className="text-xs text-yellow-400">
-            Not calibrated — gaze selection is off until you calibrate.
+            Not calibrated — enter eye control and click the dots{' '}
+            {calibrationSampleCount > 0 ? `(${calibrationSampleCount} so far)` : ''}.
           </p>
         )}
       </div>
@@ -239,21 +183,15 @@ export default function EyeTrackingPanel({
       {/* Divider */}
       <div className="h-px bg-border" />
 
-      {/* Camera Permission */}
+      {/* Camera / throughput */}
       <div className="text-xs text-muted-foreground space-y-2">
         {cameraResolution && (
           <p>
             Capture:{' '}
-            <span className={lowResolution ? 'text-yellow-400' : 'text-foreground'}>
+            <span className="text-foreground">
               {cameraResolution.width}×{cameraResolution.height}
             </span>
             {fps > 0 && <span> · {fps} fps</span>}
-          </p>
-        )}
-        {lowResolution && (
-          <p className="text-yellow-400">
-            This webcam capped below 720p, which limits how precisely the iris can
-            be located.
           </p>
         )}
         <p>
@@ -269,16 +207,6 @@ export default function EyeTrackingPanel({
           </span>
         </p>
       </div>
-
-      {/* Recalibrate Button */}
-      <motion.button
-        onClick={onCalibrationClick}
-        whileHover={{ scale: 1.02 }}
-        whileTap={{ scale: 0.98 }}
-        className="w-full px-3 py-2 rounded-lg bg-primary/10 hover:bg-primary/20 text-primary text-sm font-medium transition-colors"
-      >
-        Recalibrate
-      </motion.button>
     </motion.div>
   )
 }
