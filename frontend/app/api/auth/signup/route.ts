@@ -1,8 +1,9 @@
 import { NextResponse } from 'next/server'
 import { prisma } from '@/lib/server/prisma'
 import { hashPassword } from '@/lib/server/auth'
-import { startSession } from '@/lib/server/session'
+import { assertSessionConfig, startSession } from '@/lib/server/session'
 import { readJsonBody, validateCredentials } from '@/lib/server/validation'
+import { isConfigError } from '@/lib/server/config-error'
 
 /** POST /api/auth/signup — create an account and sign in. */
 
@@ -21,6 +22,9 @@ export async function POST(request: Request) {
   }
 
   try {
+    // Before the insert: a session we cannot sign is not worth an account row.
+    assertSessionConfig()
+
     const existing = await prisma.user.findUnique({ where: { email } })
     if (existing) {
       return NextResponse.json(
@@ -46,6 +50,13 @@ export async function POST(request: Request) {
       return NextResponse.json(
         { msg: 'An account with that email already exists.', errors: { email: 'Already registered.' } },
         { status: 409 },
+      )
+    }
+    if (isConfigError(error)) {
+      console.error('[signup] server misconfigured:', error.message)
+      return NextResponse.json(
+        { msg: 'The server is not configured correctly. Please try again later.', code: error.code },
+        { status: 503 },
       )
     }
     console.error('[signup] failed:', error)

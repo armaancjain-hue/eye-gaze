@@ -1,5 +1,6 @@
 import { cookies } from 'next/headers'
 import { SignJWT, jwtVerify } from 'jose'
+import { ConfigError } from './config-error'
 
 /**
  * Session handling: a signed, HTTP-only cookie carrying the user's identity.
@@ -20,15 +21,41 @@ export interface SessionUser {
   name: string
 }
 
+/**
+ * HS256 needs a key of at least 256 bits, and `jose` rejects anything shorter
+ * outright — so this is a hard floor, not a policy choice. Measured in *bytes*
+ * rather than characters: `.length` counts UTF-16 units, so a 32-character
+ * secret containing any non-ASCII character passed a character check while
+ * still being the wrong size for the key.
+ */
+const MIN_SECRET_BYTES = 32
+
 function getSecret(): Uint8Array {
   const secret = process.env.AUTH_SECRET
-  if (!secret || secret.length < 32) {
-    throw new Error(
-      'AUTH_SECRET is missing or too short (needs 32+ characters). Generate one with: ' +
+  if (!secret) {
+    throw new ConfigError(
+      'AUTH_SECRET is not set. Add it to .env.local for local development, or to the ' +
+        'project’s environment variables in Vercel (then redeploy).',
+    )
+  }
+  const key = new TextEncoder().encode(secret)
+  if (key.length < MIN_SECRET_BYTES) {
+    throw new ConfigError(
+      `AUTH_SECRET is too short: ${key.length} bytes, needs ${MIN_SECRET_BYTES}+. Generate one with: ` +
         'node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'base64url\'))"',
     )
   }
-  return new TextEncoder().encode(secret)
+  return key
+}
+
+/**
+ * Fail before doing any work that a broken session config would strand
+ * half-finished — signup in particular used to insert the account and only then
+ * discover it could not issue a cookie, leaving an orphan row behind and a
+ * 500 in the user's face on every subsequent attempt (409 on retry).
+ */
+export function assertSessionConfig(): void {
+  getSecret()
 }
 
 export async function createSessionToken(user: SessionUser): Promise<string> {
