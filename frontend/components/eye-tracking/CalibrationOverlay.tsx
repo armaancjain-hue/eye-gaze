@@ -6,6 +6,7 @@ import {
   buildCalibrationModel,
   CALIBRATION_TARGETS,
   createCalibrationSample,
+  LOW_QUALITY_ERROR_SQUARES,
   robustPoint,
   targetToViewport,
   VALIDATION_TARGETS_ON_BOARD,
@@ -21,6 +22,9 @@ const SETTLE_MS = 350
 const SAMPLE_MS = 850
 const SAMPLE_EVERY_MS = 45
 const MIN_SAMPLES_PER_TARGET = 8
+/** A click still collects for this long, so a target is never fitted to one frame. */
+const CLICK_BURST_MS = 220
+const CLICK_MIN_SAMPLES = 2
 
 interface CalibrationOverlayProps {
   /** Live raw WebEyeTrack viewport point, read without causing React renders. */
@@ -73,6 +77,8 @@ export default function CalibrationOverlay({
   const [layoutTick, setLayoutTick] = useState(0)
   /** True once at least one usable gaze point has been read from the tracker. */
   const [hasSignal, setHasSignal] = useState(false)
+  /** The rejected model, kept so "use it anyway" does not require a redo. */
+  const [rejectedModel, setRejectedModel] = useState<CalibrationModel | null>(null)
   /** Set while a target is live: captures it immediately (click / Space). */
   const finishRef = useRef<(() => void) | null>(null)
 
@@ -107,6 +113,63 @@ export default function CalibrationOverlay({
     return () => clearInterval(id)
   }, [rawGazePointRef])
 
+  const restart = useCallback(() => {
+    fitSamplesRef.current = []
+    validationSamplesRef.current = []
+    setRejectedModel(null)
+    setSampling(false)
+    setIndex(0)
+    setPhase('collecting')
+    setMessage('Look at the target')
+  }, [])
+
+  const acceptRejected = useCallback(() => {
+    if (rejectedModel) onCompleteRef.current(rejectedModel)
+  }, [rejectedModel])
+
+  /** Latest action handlers for the window-level click interceptor below. */
+  const actionsRef = useRef({ restart, acceptRejected })
+  actionsRef.current = { restart, acceptRejected }
+
+  /**
+   * Swallow every click while calibrating, at the capture phase, before it can
+   * reach the window.
+   *
+   * WebEyeTrack's proxy installs its own bubble-phase window click listener and
+   * adapts the on-device model on each click, treating the *cursor* as ground
+   * truth for where the user is looking. During calibration the cursor sits
+   * wherever the mouse was left while the eyes are on the dot, so those clicks
+   * teach the tracker a mapping toward the mouse and shift the raw stream from
+   * one target to the next — the fit is then chasing a moving source and the
+   * validation error stays stuck above the reject line however carefully the
+   * user holds their gaze. Capturing here (and driving our own buttons from the
+   * same handler, since nothing downstream sees the event) keeps the raw stream
+   * stationary for the length of the calibration.
+   */
+  useEffect(() => {
+    const onWindowClick = (e: MouseEvent) => {
+      e.preventDefault()
+      e.stopPropagation()
+      e.stopImmediatePropagation()
+      const el = e.target instanceof Element ? e.target.closest('[data-calibration-action]') : null
+      switch (el?.getAttribute('data-calibration-action')) {
+        case 'cancel':
+          onCancelRef.current()
+          break
+        case 'restart':
+          actionsRef.current.restart()
+          break
+        case 'accept':
+          actionsRef.current.acceptRejected()
+          break
+        default:
+          finishRef.current?.()
+      }
+    }
+    window.addEventListener('click', onWindowClick, true)
+    return () => window.removeEventListener('click', onWindowClick, true)
+  }, [])
+
   const storeTarget = useCallback(
     (target: CalibrationTarget, raw: { x: number; y: number }) => {
       const boardRect = rectForCurrentBoard()
@@ -128,6 +191,7 @@ export default function CalibrationOverlay({
 
     let cancelled = false
     let interval: ReturnType<typeof setInterval> | null = null
+    let settleTimer: ReturnType<typeof setTimeout> | null = null
     let finishTimer: ReturnType<typeof setTimeout> | null = null
     const points: Array<{ x: number; y: number }> = []
 
@@ -150,12 +214,13 @@ export default function CalibrationOverlay({
 
     /**
      * Commit this target. `minSamples` is relaxed for a click-confirmed capture:
-     * the user is telling us they are on the dot right now, so a couple of frames
-     * is enough — waiting out the full hold would just discard their input.
+     * the user is telling us they are on the dot right now, so a short burst is
+     * enough — waiting out the full hold would just discard their input.
      */
     const commit = (minSamples: number) => {
       if (cancelled) return
       if (interval) clearInterval(interval)
+      if (settleTimer) clearTimeout(settleTimer)
       if (finishTimer) clearTimeout(finishTimer)
       finishRef.current = null
       setSampling(false)
@@ -200,40 +265,65 @@ export default function CalibrationOverlay({
         )
 
       if (!model) {
+        setRejectedModel(null)
         setPhase('low-quality')
-        setMessage('Calibration failed. Please recalibrate.')
+        setMessage('Calibration failed — no usable fit from these samples.')
         return
       }
 
-      if (model.qualityScore < 0.25) {
+      // One source of truth for "too inaccurate to use": the model's own reject
+      // line. The overlay used to apply a second, stricter cut of its own.
+      if (model.validationErrorSquares > LOW_QUALITY_ERROR_SQUARES) {
+        setRejectedModel(model)
         setPhase('low-quality')
-        setMessage('Calibration quality is low. Please recalibrate.')
+        setMessage(
+          `Accuracy came out at about ${model.validationErrorSquares.toFixed(1)} squares — ` +
+            'more than a square off. Better light on your face, a steadier head and holding ' +
+            'each dot a beat longer usually fixes it.',
+        )
         return
       }
 
       setPhase('complete')
-      setMessage(model.validationErrorSquares > 0.55 ? 'Calibration saved with low accuracy' : 'Calibration complete')
+      setMessage(
+        model.validationErrorSquares > LOW_QUALITY_ERROR_SQUARES * 0.7
+          ? 'Calibration saved with low accuracy'
+          : 'Calibration complete',
+      )
       onCompleteRef.current(model)
     }
 
-    const settleTimer = setTimeout(() => {
+    settleTimer = setTimeout(() => {
       if (cancelled) return
       setSampling(true)
-      setMessage('Hold your gaze (or click the dot)')
+      setMessage('Hold your gaze (or click / press Space)')
       interval = setInterval(collect, SAMPLE_EVERY_MS)
       finishTimer = setTimeout(() => commit(MIN_SAMPLES_PER_TARGET), SAMPLE_MS)
     }, SETTLE_MS)
 
-    // Manual capture: a click (or Space) grabs the point being looked at now.
+    /**
+     * Manual capture: a click (or Space) grabs the point being looked at now.
+     * It still runs a short burst rather than committing the single frame under
+     * the cursor — one sample of a noisy stream per target is what produced
+     * unusable fits, and 220ms costs the user nothing.
+     */
     finishRef.current = () => {
+      if (cancelled) return
+      finishRef.current = null
+      if (settleTimer) clearTimeout(settleTimer)
+      if (finishTimer) clearTimeout(finishTimer)
+      if (!interval) {
+        setSampling(true)
+        interval = setInterval(collect, SAMPLE_EVERY_MS)
+      }
       collect()
-      commit(1)
+      finishTimer = setTimeout(() => commit(CLICK_MIN_SAMPLES), CLICK_BURST_MS)
     }
 
     return () => {
       cancelled = true
       finishRef.current = null
-      clearTimeout(settleTimer)
+      if (settleTimer) clearTimeout(settleTimer)
       if (finishTimer) clearTimeout(finishTimer)
       if (interval) clearInterval(interval)
     }
@@ -244,12 +334,13 @@ export default function CalibrationOverlay({
       if (e.key === 'Escape') onCancelRef.current()
       if (e.key === ' ' || e.key === 'Enter') {
         e.preventDefault()
-        finishRef.current?.()
+        if (phase === 'low-quality') restart()
+        else finishRef.current?.()
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [])
+  }, [phase, restart])
 
   const progress = total ? (completed / total) * 100 : 0
   const phaseLabel = phase === 'validating' ? 'Validation' : 'Calibration'
@@ -259,10 +350,7 @@ export default function CalibrationOverlay({
       : index + 1
 
   return (
-    <div
-      className="fixed inset-0 z-[70]"
-      onClick={() => finishRef.current?.()}
-    >
+    <div className="fixed inset-0 z-[70]">
       <div className="absolute inset-0 bg-background/85 backdrop-blur-sm" />
 
       <div className="absolute top-6 left-1/2 z-10 w-[min(92vw,28rem)] -translate-x-1/2 text-center space-y-3 px-4 pointer-events-none">
@@ -270,22 +358,26 @@ export default function CalibrationOverlay({
         <p className="text-sm text-muted-foreground">
           {message}
         </p>
-        <p className="text-xs text-muted-foreground/80">
-          {phaseLabel} {Math.min(currentNumber, total)}/{total}
-        </p>
-        <p className={`text-xs ${hasSignal ? 'text-muted-foreground/70' : 'text-yellow-400'}`}>
-          {hasSignal
-            ? 'Tracking live — look at the dot, or click it to capture now'
-            : 'Waiting for the eye tracker… (camera on? face in frame?)'}
-        </p>
-        <div className="mx-auto h-1 w-full rounded-full bg-muted overflow-hidden">
-          <motion.div
-            className="h-full bg-primary"
-            initial={false}
-            animate={{ width: `${progress}%` }}
-            transition={{ duration: 0.2 }}
-          />
-        </div>
+        {phase !== 'low-quality' && (
+          <>
+            <p className="text-xs text-muted-foreground/80">
+              {phaseLabel} {Math.min(currentNumber, total)}/{total}
+            </p>
+            <p className={`text-xs ${hasSignal ? 'text-muted-foreground/70' : 'text-yellow-400'}`}>
+              {hasSignal
+                ? 'Tracking live — look at the dot, or click it to capture now'
+                : 'Waiting for the eye tracker… (camera on? face in frame?)'}
+            </p>
+            <div className="mx-auto h-1 w-full rounded-full bg-muted overflow-hidden">
+              <motion.div
+                className="h-full bg-primary"
+                initial={false}
+                animate={{ width: `${progress}%` }}
+                transition={{ duration: 0.2 }}
+              />
+            </div>
+          </>
+        )}
       </div>
 
       <AnimatePresence mode="wait">
@@ -312,12 +404,32 @@ export default function CalibrationOverlay({
         )}
       </AnimatePresence>
 
+      {/* A rejected calibration is a fork in the road, not a dead end: redo it,
+          or play with what we have (the board still stabilises and dwells). */}
+      {phase === 'low-quality' && (
+        <div className="absolute top-1/2 left-1/2 z-10 flex w-[min(92vw,28rem)] -translate-x-1/2 -translate-y-1/2 flex-col items-center gap-3">
+          <button
+            type="button"
+            data-calibration-action="restart"
+            className="w-full rounded-md bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground"
+          >
+            Try again
+          </button>
+          {rejectedModel && (
+            <button
+              type="button"
+              data-calibration-action="accept"
+              className="w-full rounded-md border border-border bg-card/90 px-4 py-2 text-sm text-foreground"
+            >
+              Use it anyway
+            </button>
+          )}
+        </div>
+      )}
+
       <button
         type="button"
-        onClick={(e) => {
-          e.stopPropagation()
-          onCancelRef.current()
-        }}
+        data-calibration-action="cancel"
         className="absolute bottom-6 left-1/2 -translate-x-1/2 z-10 rounded-md border border-border bg-card/90 px-3 py-2 text-xs text-muted-foreground hover:text-foreground"
       >
         Cancel calibration

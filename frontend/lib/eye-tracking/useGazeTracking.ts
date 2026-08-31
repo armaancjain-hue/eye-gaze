@@ -5,6 +5,7 @@ import { WebEyeTrackSource } from './webeyetrack-source'
 import type { EyeTrackingState, GazePoint, TrackingStatus } from './types'
 import {
   applyCalibrationModel,
+  isLowQualityModel,
   clearCalibrationModel,
   loadCalibrationModel,
   saveCalibrationModel,
@@ -103,7 +104,7 @@ export function useGazeTracking(): UseGazeTracking {
       calibrationProgress: 100,
       calibrationQuality: stored.qualityScore,
       calibrationErrorSquares: stored.validationErrorSquares,
-      trackingIssue: stored.qualityScore < 0.4 ? 'low-confidence' : prev.trackingIssue,
+      trackingIssue: isLowQualityModel(stored) ? 'low-confidence' : prev.trackingIssue,
     }))
   }, [])
 
@@ -135,7 +136,9 @@ export function useGazeTracking(): UseGazeTracking {
       calibrationProgress: 100,
       calibrationQuality: model.qualityScore,
       calibrationErrorSquares: model.validationErrorSquares,
-      trackingIssue: model.qualityScore < 0.4 ? 'low-confidence' : null,
+      // Only a calibration past the module's own reject line is a warning; a
+      // pass-but-not-perfect fit is the normal case for a webcam tracker.
+      trackingIssue: isLowQualityModel(model) ? 'low-confidence' : null,
     }))
   }, [])
 
@@ -195,7 +198,11 @@ export function useGazeTracking(): UseGazeTracking {
 
         const corrected: GazePoint = {
           ...smoothed,
-          confidence: point.confidence * (model ? Math.max(0.2, model.qualityScore) : 0.3),
+          // The stabiliser already scores calibration quality as its own term, so
+          // only take a light haircut here — multiplying the per-frame confidence
+          // by the raw quality score counted it twice and left an honest ~1-square
+          // calibration unable to reach the dwell commit threshold.
+          confidence: point.confidence * (model ? Math.max(0.45, model.qualityScore) : 0.3),
         }
         correctedGazePointRef.current = corrected
 

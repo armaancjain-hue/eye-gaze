@@ -1,6 +1,6 @@
 import type { BoardRect } from './board-mapping'
 
-export const GAZE_CALIBRATION_STORAGE_KEY = 'armaan.chess.gazeCalibration.v1'
+export const GAZE_CALIBRATION_STORAGE_KEY = 'armaan.chess.gazeCalibration.v2'
 
 export type CalibrationPhase = 'idle' | 'collecting' | 'validating' | 'complete' | 'low-quality'
 
@@ -19,7 +19,7 @@ export interface CalibrationSample {
 }
 
 export interface CalibrationModel {
-  version: 1
+  version: 2
   kind: 'affine' | 'quadratic'
   coefficientsX: number[]
   coefficientsY: number[]
@@ -39,7 +39,20 @@ export interface CalibrationQuality {
 }
 
 const BOARD_SIZE = 8
-const LOW_QUALITY_ERROR_SQUARES = 0.55
+
+/**
+ * Validation error (in board squares) above which a calibration is rejected.
+ *
+ * This is deliberately about one square. A webcam appearance-based gaze model
+ * lands within roughly 2-3cm of the true point of regard on a laptop at arm's
+ * length, and a fullscreen board square is ~1.5-2.5cm across, so ~1 square of
+ * residual error *is* a working calibration for dwell selection: the stabiliser
+ * votes over a 300ms window and the dwell needs a majority, both of which absorb
+ * sub-square jitter. The previous 0.55 threshold demanded ~40px accuracy, which
+ * no consumer webcam pipeline reaches — every calibration was rejected as
+ * "low quality" no matter how carefully the user held their gaze.
+ */
+export const LOW_QUALITY_ERROR_SQUARES = 1.25
 
 const FIT_TARGETS: Array<[number, number]> = [
   [0.5, 0.5],
@@ -86,9 +99,27 @@ export const VALIDATION_TARGETS_ON_BOARD: CalibrationTarget[] = VALIDATION_TARGE
 
 const clamp01 = (value: number) => Math.max(0, Math.min(1, value))
 
-function features(point: { x: number; y: number }, kind: CalibrationModel['kind']): number[] {
-  if (kind === 'affine') return [point.x, point.y, 1]
-  return [point.x, point.y, point.x * point.y, point.x * point.x, point.y * point.y, 1]
+/**
+ * Feature vector for one raw gaze point, in *board-normalised* coordinates
+ * (0 at the board centre, +/-0.5 at its edges).
+ *
+ * Normalising matters: fitted on raw viewport pixels the quadratic design matrix
+ * carries terms up to x^2 ~ 1e6, so X'X spans ~1e13 and the Gaussian elimination
+ * below returns numerical noise while still looking solvable. It also makes the
+ * ridge term mean the same thing for every screen size. `rect` is stored on the
+ * model, so fit and apply always normalise against the same frame.
+ */
+function features(
+  point: { x: number; y: number },
+  kind: CalibrationModel['kind'],
+  rect: BoardRect,
+): number[] {
+  const width = Math.max(1, rect.width)
+  const height = Math.max(1, rect.height)
+  const x = (point.x - (rect.left + width / 2)) / width
+  const y = (point.y - (rect.top + height / 2)) / height
+  if (kind === 'affine') return [x, y, 1]
+  return [x, y, x * y, x * x, y * y, 1]
 }
 
 function solveLinearSystem(matrix: number[][], vector: number[]): number[] | null {
@@ -119,7 +150,7 @@ function solveLinearSystem(matrix: number[][], vector: number[]): number[] | nul
 function fitAxis(
   rows: number[][],
   values: number[],
-  ridge = 1e-5,
+  ridge = 1e-4,
 ): number[] | null {
   const cols = rows[0]?.length ?? 0
   if (!cols || rows.length < cols) return null
@@ -144,7 +175,7 @@ function fitModel(
   boardRect: BoardRect,
   validation: CalibrationQuality,
 ): CalibrationModel | null {
-  const rows = samples.map((sample) => features(sample.raw, kind))
+  const rows = samples.map((sample) => features(sample.raw, kind, boardRect))
   const coefficientsX = fitAxis(
     rows,
     samples.map((sample) => sample.expected.x),
@@ -156,7 +187,7 @@ function fitModel(
   if (!coefficientsX || !coefficientsY) return null
 
   return {
-    version: 1,
+    version: 2,
     kind,
     coefficientsX,
     coefficientsY,
@@ -190,7 +221,7 @@ function scoreSamples(
   }
 
   const errors = samples.map((sample) => {
-    const row = features(sample.raw, kind)
+    const row = features(sample.raw, kind, boardRect)
     const x = applyCoefficients(coefficientsX, row)
     const y = applyCoefficients(coefficientsY, row)
     return Math.hypot(x - sample.expected.x, y - sample.expected.y)
@@ -209,6 +240,11 @@ function scoreSamples(
     qualityScore,
     lowQuality: errorSquares > LOW_QUALITY_ERROR_SQUARES,
   }
+}
+
+/** True when a fitted model missed by more than the reject line allows. */
+export function isLowQualityModel(model: CalibrationModel | null): boolean {
+  return !model || !(model.validationErrorSquares <= LOW_QUALITY_ERROR_SQUARES)
 }
 
 export function targetToViewport(target: CalibrationTarget, rect: BoardRect): { x: number; y: number } {
@@ -255,7 +291,7 @@ export function applyCalibrationModel(
   point: { x: number; y: number },
 ): { x: number; y: number } {
   if (!model) return point
-  const row = features(point, model.kind)
+  const row = features(point, model.kind, model.boardRect)
   return {
     x: applyCoefficients(model.coefficientsX, row),
     y: applyCoefficients(model.coefficientsY, row),
@@ -267,7 +303,7 @@ export function buildCalibrationModel(
   validationSamples: CalibrationSample[],
   boardRect: BoardRect,
 ): CalibrationModel | null {
-  const affineRows = fitSamples.map((sample) => features(sample.raw, 'affine'))
+  const affineRows = fitSamples.map((sample) => features(sample.raw, 'affine', boardRect))
   const affineX = fitAxis(
     affineRows,
     fitSamples.map((sample) => sample.expected.x),
@@ -284,16 +320,18 @@ export function buildCalibrationModel(
   let chosenQuality = affineQuality
 
   if (fitSamples.length >= 12) {
-    const quadraticRows = fitSamples.map((sample) => features(sample.raw, 'quadratic'))
+    const quadraticRows = fitSamples.map((sample) => features(sample.raw, 'quadratic', boardRect))
+    // Six features from sixteen noisy points: ridge harder than the affine fit so
+    // the curvature terms cannot chase individual samples.
     const quadraticX = fitAxis(
       quadraticRows,
       fitSamples.map((sample) => sample.expected.x),
-      1e-3,
+      1e-2,
     )
     const quadraticY = fitAxis(
       quadraticRows,
       fitSamples.map((sample) => sample.expected.y),
-      1e-3,
+      1e-2,
     )
 
     if (quadraticX && quadraticY) {
@@ -329,7 +367,7 @@ export function loadCalibrationModel(): CalibrationModel | null {
     if (!raw) return null
     const model = JSON.parse(raw) as CalibrationModel
     if (
-      model?.version !== 1 ||
+      model?.version !== 2 ||
       !Array.isArray(model.coefficientsX) ||
       !Array.isArray(model.coefficientsY) ||
       !model.boardRect
